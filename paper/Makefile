@@ -27,7 +27,7 @@ $(PDF): $(MAIN).tex bibliography.bib
 # Clean auxiliary files
 .PHONY: clean
 clean:
-	rm -f *.aux *.log *.out *.bbl *.blg *.toc *.lof *.lot *.fls *.fdb_latexmk *.synctex.gz
+	rm -f *.aux *.log *.out *.bbl *.blg *.toc *.lof *.lot *.fls *.fdb_latexmk *.synctex.gz *.pdf
 
 # Clean all generated files including PDF
 .PHONY: distclean
