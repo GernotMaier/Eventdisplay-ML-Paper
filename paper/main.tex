@@ -122,31 +122,43 @@ Hillas parameters \citep{2024A&A...691A.328A} or full camera images.
 Performance varies across methods, with template-model based algorithms achieving
 the highest precision at the cost of computational complexity and robustness.
 
-This paper shows how a simple machine-learning-based regression layer
-can improve the performance of existing image-parameter based
+This paper shows that a simple machine-learning-based regression layer
+using the XGBoost library \citep{Chen:2016:XST:2939672.2939785}
+can improve the performance of existing image-parameter-based
 reconstruction methods.
-The method adds a thin layer to existing analysis pipelines and obtains performance gains
-while retaining the robustness of the established methods.
-The explicit goal is to use this method for archival data from almost two
-decades of observations of the VERITAS IACT array \citep{2006APh....25..391H},
-without a complete re-write of the analysis code or low-level reprocessing
+The approach adds a thin code layer to an established analysis pipeline, yielding performance gains
+while retaining their robustness.
+The explicit goal is to use this method for archival data spanning almost two
+decades of VERITAS \citep{2006APh....25..391H} observations
+without requiring a complete re-write of the analysis code or low-level reprocessing
 of raw data.
-The method is robust enough to be easily adapted to different IACT arrays,
-as demonstrated here for both VERITAS and the Northern array of the Cherenkov Telescope Array Observatory (CTAO)
+The method is sufficiently robust to be easily adapted to different IACT arrays,
+as demonstrated for both VERITAS and simulations of the Northern array of the Cherenkov Telescope Array Observatory (CTAO)
 \citep{2019scta.book.....C}.
-
-The paper is structured as follows:
-Section 2 describes the data pipeline and feature engineering.
-Section 3 discusses the regression targets and performance metrics.
-Section 4 presents the model architecture and training strategy.
-Section 5 evaluates the performance and Section 7 discusses systematic effects and robustness.
-Section 7 concludes with summary and outlook.
 
 The code developed for this paper is available from \citep{maier_2026_18412988}.
 All methods and results presented here are based on the open-source Eventdisplay reconstruction
 code \citep{maier_2025_17447664,maier_2026_18412887}.
 
-\section{Data Pipeline and Feature Engineering}
+The paper is structured as follows:
+Section 2 describes the data pipeline and feature engineering.
+Section 3 discusses the regression targets and performance metrics.
+Section 4 presents the model architecture and training strategy.
+Section 5 evaluates the performance and Section 6 discusses systematic effects and robustness.
+Section 7 concludes with summary and outlook.
+
+
+\section{Regression Targets and Features}
+
+The analysis is based on a single multi-target regression approach with the following three targets:
+logarithm of the primary energy ($\log_{10}(E)$) and the two-dimensional direction offsets
+in camera coordinates ($x, y$).
+
+Input features are derived from the standard Eventdisplay reconstruction pipeline
+and include image parameters as width, length, size, and distance for each telescopes,
+
+
+
 
 
 \begin{itemize}
@@ -259,6 +271,78 @@ use image parameter / additional features for support
   \item Summary of regression performance
 \end{itemize}
 
+\appendix
+
+\section{Detailed description of features}
+
+\subsubsection{Telescope-level features}
+
+\begin{longtable}{lll p{5cm}}
+\caption{Description telescope-level features.} \label{tab:features-image} \\
+\hline
+\textbf{Feature Name} & \textbf{Description} & \textbf{Range} \\
+\hline
+width & Image width (Hillas) & $[0,5]$ (clipped) \\
+length & Image length (Hillas) & $[0,5]$ (clipped) \\
+asym & Image asymmetry (Hillas) & $[0,5]$ (clipped) \\
+cen\_x/y & Image centroids (Hillas) & $[0,5]$ (clipped) \\
+cosphi, sinphi & Image orientation (Hillas) & $[-1,1]$ \\
+loss & Image loss (fraction of truncated image) & $[0,1]$ \\
+\endfirsthead
+
+\end{longtable}
+
+\subsection{Stereo-reconstruction features}
+
+\begin{longtable}{llll p{5cm}}
+\caption{Description stereo-reconstruction features.} \label{tab:features-stereo} \\
+\hline
+\textbf{Feature Name} & \textbf{Description} & \textbf{Range} & \textbf{Type} \\
+\hline
+\endfirsthead
+X/Y\_off & X/Y offset from DispBDT method & $[-1,1]$ (clipped) & per telescope \\
+X/Y\_off\_intersect & X/Y offset from intersection method & $[-1,1]$ (clipped) & per telescope \\
+disp & DispBDT distance & $[0,1]$ (clipped) & per telescope \\
+disp\_x,y & DispBDT distance in x/y direction & $[-1,1]$ (clipped) & per telescope \\
+Diff\_X/Yoff & & per telescope \\
+Diff\_Woff & & & per telescope \\
+Diff\_T& & & per telescope \\
+ES & & & per telescope \\
+E & & & per telescope \\
+EmissionHeight & & & per event \\
+Geomagnetic\_Angle & & & per event \\
+R\_core & & & per telescope \\
+tel\_rel\_x/y & & & per telescope \\
+
+\end{longtable}
+
+\subsubsection{Event-level features}
+
+\begin{longtable}{llll p{5cm}}
+\caption{Description array features.} \label{tab:features-array} \\
+\hline
+\textbf{Feature Name} & \textbf{Description} & \textbf{Range} & \textbf{Type} \\
+\hline
+\endfirsthead
+DispNImages & Number of images (DispBDT) & $[2,\mathrm{N_{tel}}]$ & per event \\
+tel\_active  & & & per telescope \\
+array\_foot\_print & & & per event \\
+mirror\_area & & & per event \\
+
+
+\end{longtable}
+
+
+
+
+% Features:
+% mirror_area_2, mirror_area_3, nlowgain_0, nlowgain_1, nlowgain_2, nlowgain_3,
+% ntubes_0, ntubes_1, ntubes_2, ntubes_3, sinphi_0, sinphi_1, sinphi_2, sinphi_3,
+% size_0, size_1, size_2, size_3, size_dist2_0, size_dist2_1, size_dist2_2, size_dist2_3,
+% tel_active_0, tel_active_1, tel_active_2, tel_active_3, tel_rel_x_0, tel_rel_x_1,
+% tel_rel_x_2, tel_rel_x_3, tel_rel_y_0, tel_rel_y_1, tel_rel_y_2, tel_rel_y_3, tgrad_x_0,
+% tgrad_x_1, tgrad_x_2, tgrad_x_3, width_0, width_1, width_2, width_3, width_length_0,
+% width_length_1, width_length_2, width_length_3
 
 \section*{AI usage disclosure}
 
