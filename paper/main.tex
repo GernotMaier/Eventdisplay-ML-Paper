@@ -150,49 +150,66 @@ Section 7 concludes with summary and outlook.
 
 \section{Regression Targets and Features}
 
-The analysis is based on a single multi-target regression approach with the following three targets:
+At the core of this approach is a multi-target regression approach with the following three targets:
 logarithm of the primary energy ($\log_{10}(E)$) and the two-dimensional direction offsets
 in camera coordinates ($x, y$).
+Training features are derived from the Eventdisplay reconstruction pipeline and are
+categorized into telescope-level features, stereo-reconstruction features, and features
+describing the array layout and observation conditions.
+Detailed feature descriptions are provided in Appendix \ref{sec:features}.
+Clipping and transformations (e.g., logarithmic scaling of size and energy) are applied
+to handle the wide dynamic range of the data and to mitigate the influence of outliers.
 
-Input features are derived from the standard Eventdisplay reconstruction pipeline
-and include image parameters as width, length, size, and distance for each telescopes,
+Telescope-level features include image (Hillas) parameters such as width, length, size,
+and distance for each telescope, along with additional features engineered to correct for
+systematic effects like image truncation.
+In addition to image size, the brightness of the measurement is described by the
+number of pixels after image cleaning and the number of active low-gain pixels (for telescopes
+with dual-gain readout such as VERITAS or the CTAO Large-Sized Telescopes).
+The relationship between telescope-level features and actual telescopes is
+broken by sorting features by image size (largest first) and filling telescopes without
+data with not-a-number (NaN) values.
+For CTAO, which consist of different telescope types, features are sorted first by
+telescope mirror area (largest first) as a proxy for telescope type,
+with features for each telescope then sorted by image size (largest first).
+The sorting allows to apply the same model to events with different telescope multiplicities.
+
+Stereo reconstruction features include the results of two
+different energy and direction reconstruction methods plus intermediate features such
+as shower core distance, Cherenkov emission height, and weighting factors
+used by during the reconstruction.
+For energy reconstruction, the methods include multi-dimensional look-up
+tables (table axes are image size, core distance, offset of the observed pointing direction
+from the camera centre, zenith and azimuth angle, level of nigh-sky background light) and
+boosted-regression-tree (BDT)\footnote{
+  BDT-based methods are included in the
+  Eventdisplay for both energy and direction reconstruction.
+  The implementation is based on the TMVA package \citep{2007physics...3039H}.}
+based energy estimators based on a subset of the image parameters.
+For direction reconstruction, the standard methods include the intersection of lines method
+based on image orientations and a BDT regression-tree based method based on the estimation of
+the displacement (disp) of the shower direction from the image centroid.
+The disp-BDT method provides both an average energy and direction estimation, plus per-telescope estimates
+including estimated errors for each telescope, which are used as features for the learner.
+
+Global observation conditions are described by features such as the number of active telescopes,
+the array footprint (the area covered by active telescopes), and the angle of the telescope pointing
+with respect to the geomagnetic field.
 
 
-
-
+% TODO - why no pedvars?
 
 \begin{itemize}
-  \item IACT event reconstruction
-  \item Energy and direction regression
-  \item Machine-learning-based reconstruction
-    \item Limitations of classical geometric reconstruction (Hillas-based intersection).
-    \item Objective: Improving angular and energy resolution via Multi-target Regression.
-    \item Motivation for Gradient Boosting in high-dynamic-range scientific data.
-  \item Standard Eventdisplay methods
-  \item Statement of the Problem
-  \item Residual learner - learn from the errors made by the existing reconstruction methods
+\item Residual learner - learn from the errors made by the existing reconstruction methods
 e.g. improve reconstruction of truncated images
-  \item Ensemble learner - learn how to combine the results from the different reconstruction methods
+\item Ensemble learner - learn how to combine the results from the different reconstruction methods
 energy is reconstructed with look-up tables and DispBDTs
 \item direction is reconstructed by the intersection of lines method and DispBDT (disp provides an average plus results per telescopes)
 use image parameter / additional features for support
 \item use >120 training features (including new ones like the angle towards the geomagnetic field)
-\end{itemize}
-
-\begin{itemize}
-  \item Training with Monte Carlo air-shower simulations
-  \item Array layout, telescope multiplicity
-  \item Energy, zenith, offset distributions
-  \item Eventdisplay-derived parameters
-  \item sorting by mirror area (telescope type) and size
-    \item \textbf{Ground Truth Labels:} Monte Carlo simulated primary energy ($MCe0$) and arrival direction offsets ($MCxoff, MCyoff$).
-    \item \textbf{Stereo Input Features:} Multi-telescope image parameters (Size, Width, Length, Distance, $\chi^2$ emission height).
-    \item \textbf{Geomagnetic Corrections:} Calculation of shower angles relative to the Earth's magnetic field ($\theta_B$) to account for Lorentz force broadening.
-    \item \textbf{Data Transformation:} Logarithmic scaling of intensity (Size) and energy to handle power-law distributions.
-    \item \textbf{Handling Multiplicity:} Flattening heterogeneous telescope array data into unified feature vectors for $N$-telescope events.
-  \item clipping and transformations (log size, log energy)
-  \item Train / validation / test samples
-  \item Evaluation with Crab Nebula data
+\item Training with Monte Carlo air-shower simulations
+\item Train / validation / test samples
+\item Evaluation with Crab Nebula data
 \end{itemize}
 
 \section{Regression Targets and Performance Metrics}
@@ -274,8 +291,9 @@ use image parameter / additional features for support
 \appendix
 
 \section{Detailed description of features}
+\label{sec:features}
 
-\subsubsection{Telescope-level features}
+\subsection{Telescope-level features}
 
 \begin{longtable}{lll p{5cm}}
 \caption{Description telescope-level features.} \label{tab:features-image} \\
@@ -316,7 +334,7 @@ tel\_rel\_x/y & & & per telescope \\
 
 \end{longtable}
 
-\subsubsection{Event-level features}
+\subsection{Event-level features}
 
 \begin{longtable}{llll p{5cm}}
 \caption{Description array features.} \label{tab:features-array} \\
