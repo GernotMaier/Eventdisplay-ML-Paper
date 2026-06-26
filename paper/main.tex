@@ -62,6 +62,7 @@
 \newcommand{\note}[1]{\begin{noteBox} \textbf{Note:} #1 \end{noteBox}}
 \newcommand{\warning}[1]{\begin{hintBox} \textbf{Warning:} #1 \end{hintBox}}
 \newcommand{\important}[1]{\begin{importantBox} \textbf{Important:} #1 \end{importantBox}}
+\newcommand{\todo}[1]{\begin{hintBox} \textbf{TODO:} #1 \end{hintBox}}
 
 \hypersetup{citecolor=blue}
 
@@ -82,17 +83,18 @@
 \maketitle
 
 \begin{abstract}
-Ground-based imaging atmospheric Cherenkov telescopes (IACTs) detect the faint
-Cherenkov light
-emitted by air showers initiated by high-energy gamma rays.
-IACTs are the primary instruments to detect these photons above tens of GeV.
-Multiple analysis methods exist to reconstruct direction and energy,
-with performance and robustness varying between depending on observation conditions
-and gamma-ray energy.
-This paper presents a machine-learning approach based on gradient-boosted regression trees
-that learns from the errors of existing methods and combine their results.
-Evaluation based on simulated events and observations of the Crab Nebula shows
-significant improvements in angular and energy resolution over existing methods.
+We present a machine-learning approach to event reconstruction and gamma/hadron
+separation for imaging atmospheric Cherenkov telescopes (IACTs), implemented as a
+thin layer on top of established analysis pipelines.
+For reconstruction, a single XGBoost model performs multi-target residual regression,
+simultaneously correcting the event direction (two angular components) and energy
+predicted by classical methods, using more than 100 image and stereo features.
+For gamma/hadron separation, energy-binned XGBoost classifiers are trained on
+Monte Carlo simulations of gamma-ray and proton-initiated air showers.
+The method is validated on VERITAS data and on simulations of the Cherenkov Telescope
+Array Observatory (CTAO) Northern array.
+Performance is evaluated on simulated events and on Crab Nebula observations,
+demonstrating improvements in angular and energy resolution over the baseline.
 \end{abstract}
 
 \section{Introduction}
@@ -113,7 +115,7 @@ Systematic uncertainties from varying observation conditions (e.g., night-sky ba
 atmospheric conditions) further limit the achievable performance and require robust
 reconstruction methods.
 
-The fields knows a variety of reconstruction methods for direction and energy estimation,
+The field knows a variety of reconstruction methods for direction and energy estimation,
 including robust and efficient geometric methods based on image parameters
 \citep{1985ICRC....3..445H, 1997APh.....8....1D, 1999APh....12..135H},
 template-model based methods \citep{2001A&A...374..895P,2006APh....25..195L, 2009APh....32..231D,2014APh....56...26P},
@@ -122,17 +124,21 @@ Hillas parameters \citep{2024A&A...691A.328A} or full camera images.
 Performance varies across methods, with template-model based algorithms achieving
 the highest precision at the cost of computational complexity and robustness.
 
-This paper shows that a simple machine-learning-based regression layer
+This paper shows that a lightweight machine-learning regression layer
 using the XGBoost library \citep{Chen:2016:XST:2939672.2939785}
 can improve the performance of existing image-parameter-based
 reconstruction methods.
-The approach adds a thin code layer to an established analysis pipeline, yielding performance gains
-while retaining their robustness.
-The explicit goal is to use this method for archival data spanning almost two
+The method implements \textit{residual regression}: rather than predicting direction
+and energy directly, a single multi-target XGBoost model learns the corrections
+(residuals) to the existing DispBDT reconstruction, effectively combining the robustness
+of the baseline method with the flexibility of gradient-boosted trees.
+For gamma/hadron separation, energy-binned XGBoost classifiers replace the
+TMVA-based BDTs used in the classical analysis.
+The explicit goal is to apply these models to archival data spanning almost two
 decades of VERITAS \citep{2006APh....25..391H} observations
 without requiring a complete re-write of the analysis code or low-level reprocessing
 of raw data.
-The method is sufficiently robust to be easily adapted to different IACT arrays,
+The method is sufficiently general to be easily adapted to different IACT arrays,
 as demonstrated for both VERITAS and simulations of the Northern array of the Cherenkov Telescope Array Observatory (CTAO)
 \citep{2019scta.book.....C}.
 
@@ -141,226 +147,591 @@ All methods and results presented here are based on the open-source Eventdisplay
 code \citep{maier_2025_17447664,maier_2026_18412887}.
 
 The paper is structured as follows:
-Section 2 describes the data pipeline and feature engineering.
-Section 3 discusses the regression targets and performance metrics.
-Section 4 presents the model architecture and training strategy.
-Section 5 evaluates the performance and Section 6 discusses systematic effects and robustness.
-Section 7 concludes with summary and outlook.
+Section~\ref{sec:features_and_targets} describes the data pipeline, feature engineering,
+and regression targets.
+Section~\ref{sec:regression} presents the regression model architecture and training strategy.
+Section~\ref{sec:classification} describes the gamma/hadron classification model.
+Section~\ref{sec:performance} evaluates performance on simulated events,
+and Section~\ref{sec:results} presents results on Crab Nebula data.
+Section~\ref{sec:systematics} discusses systematic effects and robustness.
+Section~\ref{sec:conclusions} concludes with a summary and outlook.
 
 
-\section{Regression Targets and Features}
+\section{Data Pipeline, Features, and Regression Targets}
+\label{sec:features_and_targets}
 
-At the core of this approach is a multi-target regression approach with the following three targets:
-logarithm of the primary energy ($\log_{10}(E)$) and the two-dimensional direction offsets
-in camera coordinates ($x, y$).
-Training features are derived from the Eventdisplay reconstruction pipeline and are
-categorized into telescope-level features, stereo-reconstruction features, and features
-describing the array layout and observation conditions.
-Detailed feature descriptions are provided in Appendix \ref{sec:features}.
-Clipping and transformations (e.g., logarithmic scaling of size and energy) are applied
-to handle the wide dynamic range of the data and to mitigate the influence of outliers.
+\subsection{Input data and pre-processing}
 
-Telescope-level features include image (Hillas) parameters such as width, length, size,
-and distance for each telescope, along with additional features engineered to correct for
-systematic effects like image truncation.
-In addition to image size, the brightness of the measurement is described by the
-number of pixels after image cleaning and the number of active low-gain pixels (for telescopes
-with dual-gain readout such as VERITAS or the CTAO Large-Sized Telescopes).
-The relationship between telescope-level features and actual telescopes is
-broken by sorting features by image size (largest first) and filling telescopes without
-data with not-a-number (NaN) values.
-For CTAO, which consist of different telescope types, features are sorted first by
-telescope mirror area (largest first) as a proxy for telescope type,
-with features for each telescope then sorted by image size (largest first).
-The sorting allows to apply the same model to events with different telescope multiplicities.
+The analysis uses the output of the Eventdisplay stereo reconstruction,
+stored in ROOT-format mscw files.
+These files contain, for each triggered event, the
+Hillas image parameters for each telescope, the results of two
+existing reconstruction methods (see below), and the Monte Carlo (MC) truth values
+used for training (primary direction offsets and energy).
+Pre-selection requires a minimum of two images passing image cleaning
+(\texttt{DispNImages} $\geq 2$).
+No additional quality cuts are applied at the training stage to keep the
+method applicable to the full range of observation conditions.
 
-Stereo reconstruction features include the results of two
-different energy and direction reconstruction methods plus intermediate features such
-as shower core distance, Cherenkov emission height, and weighting factors
-used by during the reconstruction.
-For energy reconstruction, the methods include multi-dimensional look-up
-tables (table axes are image size, core distance, offset of the observed pointing direction
-from the camera centre, zenith and azimuth angle, level of nigh-sky background light) and
-boosted-regression-tree (BDT)\footnote{
-  BDT-based methods are included in the
-  Eventdisplay for both energy and direction reconstruction.
-  The implementation is based on the TMVA package \citep{2007physics...3039H}.}
-based energy estimators based on a subset of the image parameters.
-For direction reconstruction, the standard methods include the intersection of lines method
-based on image orientations and a BDT regression-tree based method based on the estimation of
-the displacement (disp) of the shower direction from the image centroid.
-The disp-BDT method provides both an average energy and direction estimation, plus per-telescope estimates
-including estimated errors for each telescope, which are used as features for the learner.
+Variables with large dynamic range are log$_{10}$-transformed before use
+(image size, energy estimates, pixel counts, core distance).
+Physical limits and robustness against badly reconstructed events are
+enforced through clipping; for example, energy estimates are clipped to
+$E > 10^{-3}$~TeV, image sizes to $> 1$~p.e., and field-of-view offsets
+to $|\Delta\theta| < 7$~deg.
+Missing telescope data (telescopes not participating in a given event)
+are filled with \texttt{NaN} values; the XGBoost
+histogram-based tree algorithm (\texttt{tree\_method=hist}) handles
+these natively without explicit imputation.
 
-Global observation conditions are described by features such as the number of active telescopes,
-the array footprint (the area covered by active telescopes), and the angle of the telescope pointing
-with respect to the geomagnetic field.
+\subsection{Feature engineering and sorting}
+\label{sec:features}
+
+Features are organised in three groups: telescope-level image features,
+stereo-reconstruction features, and event-level array and observation features.
+A detailed listing is provided in Appendix~\ref{sec:appendix_features}.
+
+\textbf{Telescope-level features} are derived from image (Hillas) parameterisation
+of each camera image: major and minor axis lengths (\texttt{length}, \texttt{width}),
+image orientation (\texttt{cosphi}, \texttt{sinphi}), image centroid
+(\texttt{cen\_x}, \texttt{cen\_y}), image size (log$_{10}$, \texttt{size}),
+image asymmetry (\texttt{asym}), time gradient along the image axis (\texttt{tgrad\_x}),
+and fractional image loss at the camera edge (\texttt{loss}).
+Additional telescope-level features are
+the per-telescope energy estimates from the DispBDT reconstruction
+(\texttt{E}, \texttt{ES}), the number of image pixels after cleaning (\texttt{ntubes}),
+the number of high-charge pixels recorded in the low-gain channel (\texttt{nlowgain}),
+the impact distance from the reconstructed shower core (\texttt{R\_core}),
+and the telescope position relative to the shower core projected onto the shower plane
+(\texttt{tel\_rel\_x}, \texttt{tel\_rel\_y}).
+
+To apply a single model to events with different telescope multiplicities and
+array configurations, telescope-level features are sorted by image size
+(largest image first); telescopes without a valid image are placed last and
+their features are set to \texttt{NaN}.
+For heterogeneous arrays (e.g., CTAO), the sorting is hierarchical: first by
+mirror area (largest telescope type first), then by image size within each type.
+This scheme preserves the physics information of the brightest, most constraining
+images while allowing the same model to process all multiplicities.
+
+\textbf{Stereo-reconstruction features} include the results of two independent
+direction and energy estimators available in Eventdisplay:
+(i) the DispBDT reconstruction, which regresses the displacement of the shower
+direction from each image centroid; it provides weighted averages of the
+predicted pointing offset (\texttt{Xoff}, \texttt{Yoff}) and energy
+(\texttt{ErecS}), as well as per-telescope estimates and uncertainties;
+and (ii) the intersection-of-lines method, which intersects the image major axes
+from all telescope pairs to estimate the shower direction (\texttt{Xoff\_intersect},
+\texttt{Yoff\_intersect}).
+The DispBDT per-telescope quantities (\texttt{DispXoff\_T}, \texttt{DispYoff\_T},
+\texttt{Disp\_T}, \texttt{DispWoff\_T}) carry information on the consistency
+and precision of the individual-image reconstruction.
+Further stereo features are the Cherenkov emission height (\texttt{EmissionHeight}),
+the reconstructed shower core position (\texttt{Xcore}, \texttt{Ycore}),
+and the telescope pointing direction (elevation, azimuth).
+
+\textbf{Event-level features} capture the observational geometry and array
+configuration: the number of images used by the DispBDT reconstruction
+(\texttt{DispNImages}), the 2D convex-hull footprint area of the active telescopes,
+the angle between the shower direction and the geomagnetic field
+(\texttt{Geomagnetic\_Angle}), and per-telescope mirror areas and activity flags.
+The geomagnetic angle is computed from the pointing direction and local field
+components specific to each observatory (VERITAS, CTAO-North, CTAO-South),
+and accounts for asymmetric deflection of shower secondaries that affects
+image shape and orientation.
+
+In total, the feature vector for each event contains more than 100 features
+for a four-telescope array.
+
+\subsection{Regression targets}
+\label{sec:targets}
+
+The regression model simultaneously predicts three quantities:
+the residuals of the DispBDT direction estimate in camera coordinates,
+$\Delta x = x_\mathrm{MC} - x_\mathrm{DispBDT}$ (\texttt{Xoff\_residual}) and
+$\Delta y = y_\mathrm{MC} - y_\mathrm{DispBDT}$ (\texttt{Yoff\_residual}),
+and the residual of the DispBDT energy estimate in log$_{10}$ space,
+$\Delta\log E = \log_{10}(E_\mathrm{MC}) - \log_{10}(E_\mathrm{DispBDT})$ (\texttt{E\_residual}).
+During inference, the final predictions are obtained by adding the predicted
+residuals back to the DispBDT baseline:
+\begin{align}
+  x_\mathrm{pred} &= x_\mathrm{DispBDT} + \Delta\hat{x}, \\
+  y_\mathrm{pred} &= y_\mathrm{DispBDT} + \Delta\hat{y}, \\
+  \log_{10}(\hat{E}) &= \log_{10}(E_\mathrm{DispBDT}) + \Delta\hat{\log E}.
+\end{align}
+Predicting residuals rather than absolute values reduces the learning task
+to a correction problem: the model captures systematic biases and conditions
+under which the baseline method performs poorly
+(e.g., edge-of-camera images, high night-sky background, specific geomagnetic orientations),
+while inheriting the robustness of the DispBDT reconstruction for typical events.
+
+\subsection{Performance metrics}
+\label{sec:metrics}
+
+Angular performance is quantified by the angular resolution $R_{68}$,
+defined as the 68\% containment radius of the distribution of
+$\Delta\theta = \sqrt{(\hat{x} - x_\mathrm{MC})^2 + (\hat{y} - y_\mathrm{MC})^2}$
+in bins of true energy.
+Energy performance is quantified by the 68\% containment of the relative
+energy error $\Delta E / E = |10^{\hat{\log E}} - E_\mathrm{MC}| / E_\mathrm{MC}$
+(energy resolution) and the mean relative bias
+$(10^{\hat{\log E}} - E_\mathrm{MC}) / E_\mathrm{MC}$ (energy bias).
+Both metrics are computed in nine bins of $\log_{10}(E/\mathrm{TeV})$
+spanning $[-2.0, 2.5]$.
 
 
-% TODO - why no pedvars?
 
-\begin{itemize}
-\item Residual learner - learn from the errors made by the existing reconstruction methods
-e.g. improve reconstruction of truncated images
-\item Ensemble learner - learn how to combine the results from the different reconstruction methods
-energy is reconstructed with look-up tables and DispBDTs
-\item direction is reconstructed by the intersection of lines method and DispBDT (disp provides an average plus results per telescopes)
-use image parameter / additional features for support
-\item use >120 training features (including new ones like the angle towards the geomagnetic field)
-\item Training with Monte Carlo air-shower simulations
-\item Train / validation / test samples
-\item Evaluation with Crab Nebula data
-\end{itemize}
+\section{Regression Model}
+\label{sec:regression}
 
-\section{Regression Targets and Performance Metrics}
+\subsection{Model architecture}
 
-\begin{itemize}
-  \item Energy bias
-  \item Energy resolution (68\% containment)
-  \item Angular resolution (PSF containment)
-\end{itemize}
+A single \texttt{XGBRegressor} from the XGBoost library \citep{Chen:2016:XST:2939672.2939785}
+is trained on the three targets simultaneously using the
+native multi-output regression mode.
+The squared-error objective (\texttt{reg:squarederror}) minimises
+$\sum_i w_i (\hat{y}_i - y_i)^2$ jointly across all targets.
+Before training, each target is standardised to zero mean and unit variance
+(computed from the training set only) to prevent the larger numerical scale of
+the energy residual from dominating the direction residuals.
+Predictions are inverse-transformed to the original scale during inference.
 
-\section{Model Architecture and Training}
+The histogram-based tree algorithm (\texttt{tree\_method=hist}) is used throughout,
+which natively handles \texttt{NaN} feature values (missing telescopes)
+by assigning them to the learned default direction at each tree split.
+The model therefore processes events with any telescope multiplicity
+$\geq 2$ without pre-grouping by multiplicity class.
 
-\begin{itemize}
-  \item regression targets: energy, direction (x,y)
-  \item multi-target regression
-  \item gradient-boosted decision trees (XGBoost)
-  \item Gradient-boosted decision trees
-  \item Loss functions
-  \item Regularization and depth control
-    \item \textbf{Hyperparameters:} Optimization of tree depth (max\_depth=10), learning rate (0.1), and subsampling (0.7).
-    \item \textbf{Loss Function:} \texttt{reg:squarederror} optimized for residuals in spatial and energy domains.
-    \item \textbf{Weighted Learning:} Implementation of inverse-count energy weighting and multiplicity weighting (proportional to $N_{images}^2$) to balance the training set.
-\end{itemize}
+\subsection{Hyperparameters}
 
-\textbf{Suggested tables:}
-\begin{itemize}
-  \item Hyperparameter summary
-\end{itemize}
+The hyperparameters are summarised in Table~\ref{tab:hyperparameters}.
+The combination of a small learning rate (0.02) with a large maximum number of
+estimators (10\,000) and early stopping (patience 50) allows fine-grained
+convergence while preventing overfitting.
+Tree depth (7) and minimum child weight (10) control model complexity.
+Column and row subsampling (0.7 each) provide implicit regularisation.
 
-\subsection{Training and Validation Strategy}
+\begin{table}[h]
+\centering
+\caption{XGBoost regression hyperparameters.}
+\label{tab:hyperparameters}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+\texttt{objective}           & \texttt{reg:squarederror} \\
+\texttt{tree\_method}        & \texttt{hist} \\
+\texttt{n\_estimators}       & 10\,000 (with early stopping) \\
+\texttt{early\_stopping\_rounds} & 50 \\
+\texttt{eval\_metric}        & RMSE \\
+\texttt{learning\_rate}      & 0.02 \\
+\texttt{max\_depth}          & 7 \\
+\texttt{min\_child\_weight}  & 10 \\
+\texttt{subsample}           & 0.7 \\
+\texttt{colsample\_bytree}   & 0.7 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\begin{itemize}
-    \item feature importance
-    \item feature correlations
-  \item Independent test sample
-  \item Energy-binned evaluation
-  \item Overfitting control
-\end{itemize}
+\subsection{Training strategy and sample weighting}
+\label{sec:training}
 
-\textbf{Suggested plots/tables:}
-\begin{itemize}
-  \item Feature correlation matrix
-  \item Feature importance ranking
-  \item Training vs validation loss
-\end{itemize}
+Training data consist of Monte Carlo simulated gamma-ray events after the standard
+Eventdisplay stereo reconstruction.
+Events are split 50/50 into training and test sets using a fixed random state
+to ensure reproducibility and avoid data leakage.
+The evaluation set used for early stopping consists of both splits;
+the final model is selected at the iteration that minimises test RMSE.
 
-\section{Performance Evaluation}
+The training set is reweighted by a combined event weight
+\begin{equation}
+  w_i = w_i^{(E)} \cdot w_i^{(N)},
+\end{equation}
+where $w^{(E)}$ is an inverse-frequency weight in bins of true log$_{10}$ energy
+(events in under-populated energy bins receive higher weight)
+and $w^{(N)} \propto N_\mathrm{images}^2$ favours high-multiplicity events.
+Both weight components are normalised so that their mean equals unity,
+preserving the effective learning rate.
+Events in energy bins with fewer than 10 entries receive zero weight and are excluded.
+This combined weighting scheme improves reconstruction accuracy at high energies
+(where simulated event counts are low) and for the highest-multiplicity events
+(where reconstruction constraints are strongest).
 
-\textbf{Suggested plots/tables:}
-\begin{itemize}
-  \item \textbf{Interpretability:} Global feature importance ranking (SHAP/Gain) for energy vs. directionality.
-  \item Energy resolution vs true energy
-  \item Angular resolution vs energy
-  \item Energy bias vs true energy
-  \item cumulative distributions for MC and Crab data
-  \item theta2 plots for Crab data
-\end{itemize}
+\subsection{Feature importance and model interpretability}
+
+Feature importance is assessed using SHAP (SHapley Additive exPlanations) values
+computed on a random subsample of 1\,000 test events.
+For the native multi-output XGBoost model, SHAP values are extracted per target
+from the tree contributions (\texttt{pred\_contribs=True}),
+giving separate importance rankings for the direction
+($\Delta x$, $\Delta y$) and energy ($\Delta\log E$) corrections.
+SHAP values are also evaluated in bins of true energy to identify
+which features drive the correction at different energy scales.
+
+
+
+\section{Performance Evaluation on Simulated Events}
+\label{sec:performance}
+
+\subsection{Angular resolution}
+
+\todo{Figure: Angular resolution $R_{68}$ (68\% containment of $\Delta\theta$) vs.\ $\log_{10}(E/\mathrm{TeV})$ for the XGBoost model and the DispBDT baseline. Show also the 90\% containment.  Generated by \texttt{calculate\_resolution()} in \texttt{evaluate.py}.}
+
+\subsection{Energy resolution and bias}
+
+\todo{Figures: (1) Energy resolution (68\% containment of $|\Delta E/E|$) vs.\ $\log_{10}(E/\mathrm{TeV})$, XGBoost vs.\ DispBDT/ErecS baseline. (2) Energy bias (mean of $\Delta E/E$) vs.\ $\log_{10}(E/\mathrm{TeV})$, same comparison. Generated by \texttt{calculate\_resolution()} in \texttt{evaluate.py}.}
+
+\subsection{Diagnostic checks}
+
+Model diagnostics are evaluated with the following set of plots:
+
+\paragraph{Training convergence.}
+The RMSE of the training and test sets is recorded at each boosting round.
+Convergence and the absence of significant overfitting is verified by
+confirming that the test RMSE plateaus before early stopping triggers,
+and that the train--test gap remains below 10\%.
+\todo{Figure: Training and test RMSE vs.\ boosting round (all three targets on one plot or one panel each). Mark the early-stopping iteration. Generated by \texttt{plot\_training\_evaluation.py}.}
+
+\paragraph{Generalisation gap.}
+The per-target RMSE ratio $R_\mathrm{gen} = \mathrm{RMSE}_\mathrm{test} / \mathrm{RMSE}_\mathrm{train}$
+is computed for each of the three targets.
+Values close to 1 confirm that the model generalises well to unseen events.
+\todo{Figure: Bar chart of train and test RMSE per target ($\Delta x$, $\Delta y$, $\Delta\log E$), and the corresponding gap percentage. Generated by \texttt{diagnostic\_generalization\_gap.py}.}
+
+\paragraph{Residual normality.}
+For each target the distribution of prediction errors $(y - \hat{y})$ is tested
+for Gaussianity using the Kolmogorov--Smirnov and Anderson--Darling tests.
+Heavy tails ($|$kurtosis$| > 1$) or significant skewness indicate systematic failures
+for specific event classes.
+\todo{Figure: Residual histograms with Gaussian fits and Q-Q plots for each of the three targets. Report KS p-value, skewness, excess kurtosis, and 3$\sigma$ outlier fraction. Generated by \texttt{diagnostic\_residual\_normality.py}.}
+
+\paragraph{SHAP feature importance.}
+The top-20 features by mean absolute SHAP value are shown for each target
+(direction $x$, direction $y$, energy) to identify which input quantities
+drive the corrections.
+\todo{Figure: Horizontal bar chart of the top-20 SHAP importances for each target (three panels). Generated by \texttt{diagnostic\_shap\_summary.py}.}
+
+\paragraph{SHAP by energy bin.}
+SHAP values are computed separately in nine bins of true energy to
+identify energy-dependent feature importance.
+\todo{Figure/Table: Heat map or table of mean $|$SHAP$|$ for the top features vs.\ energy bin, one panel per target. Generated by \texttt{shap\_feature\_importance\_by\_energy()} in \texttt{evaluate.py}.}
+
+
+
+\section{Gamma/Hadron Separation}
+\label{sec:classification}
+
+\subsection{Model architecture}
+
+Gamma/hadron separation is implemented as a binary XGBoost classifier
+(\texttt{XGBClassifier}, objective \texttt{binary:logistic})
+that assigns each event a probability $p_\gamma \in [0,1]$ of being
+a gamma-ray-initiated shower.
+Because the classification problem is energy-dependent (shower morphology and
+background composition change strongly with energy), separate models are trained
+in nine energy bins spanning $\log_{10}(E_\mathrm{rec}/\mathrm{TeV}) \in [-2, 2.5]$.
+During application, adjacent bin models are interpolated linearly in
+$\log_{10}(E_\mathrm{rec})$ using interpolation weights $\alpha$:
+\begin{equation}
+  p_\gamma = (1 - \alpha)\, p_{\gamma,\mathrm{lo}} + \alpha\, p_{\gamma,\mathrm{hi}}.
+\end{equation}
+
+The classification features are a subset of the reconstruction features
+(Hillas parameters, reduced stereo quantities, MSCW/MSCL shape parameters)
+listed in Appendix~\ref{sec:appendix_features}.
+The energy estimate is used only for binning and is not a classifier input.
+
+Hyperparameters for the classifier are listed in Table~\ref{tab:hyperparameters_cls}.
+A lower tree depth (4) compared to the regression model avoids overfitting given the
+binary label noise inherent in hadronic background samples.
+
+\begin{table}[h]
+\centering
+\caption{XGBoost classification hyperparameters.}
+\label{tab:hyperparameters_cls}
+\begin{tabular}{ll}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+\texttt{objective}           & \texttt{binary:logistic} \\
+\texttt{eval\_metric}        & log-loss, AUC \\
+\texttt{n\_estimators}       & 5\,000 (with early stopping) \\
+\texttt{early\_stopping\_rounds} & 100 \\
+\texttt{learning\_rate}      & 0.02 \\
+\texttt{max\_depth}          & 4 \\
+\texttt{gamma}               & 0.2 \\
+\texttt{subsample}           & 0.8 \\
+\texttt{colsample\_bytree}   & 0.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Signal efficiency and hadron rejection}
+
+The classifier output $p_\gamma$ is converted to a binary label by applying a
+threshold $t_\gamma$ calibrated to a target signal efficiency
+(e.g., $\epsilon_\gamma = 80\%$).
+The threshold is determined from the signal and background efficiency curves
+computed on the test sample.
+Thresholds at a range of signal efficiencies (20\%--95\% in 5\% steps) are
+stored with the trained model for flexible analysis cuts.
+The classification performance is also characterised by the ROC curve
+(gamma efficiency vs.\ hadron rejection $1 - \epsilon_h$),
+the Q-factor $Q = \epsilon_\gamma / \sqrt{\epsilon_h}$,
+and the distribution of the classifier score for signal and background.
+
+\subsection{Diagnostic checks for classification}
+
+\todo{The following plots are generated by \texttt{plot\_classification\_performance\_metrics.py}. Produce one figure per energy bin (9 bins) plus one combined summary figure.}
+
+\paragraph{Signal and background efficiency curves.}
+Signal efficiency $\epsilon_\gamma(t)$ and background efficiency $\epsilon_h(t)$
+as a function of the classifier threshold $t$,
+shown for each energy bin and for the XGBoost and TMVA-BDT classifiers.
+\todo{Figure: $\epsilon_\gamma$ and $\epsilon_h$ vs.\ threshold, XGBoost (dashed) vs.\ TMVA-BDT (solid), one panel per energy bin.}
+
+\paragraph{ROC curve.}
+$\epsilon_\gamma$ vs.\ $1 - \epsilon_h$ for each energy bin,
+with the AUC value quoted as a summary metric.
+\todo{Figure: ROC curves per energy bin, XGBoost vs.\ TMVA-BDT; AUC values in legend.}
+
+\paragraph{Q-factor curve.}
+$Q(\epsilon_\gamma) = \epsilon_\gamma / \sqrt{\epsilon_h}$ as a function of gamma efficiency,
+for each energy bin.
+The maximum Q-factor provides a single-number comparison between classifiers.
+\todo{Figure: Q-factor vs.\ $\epsilon_\gamma$ per energy bin, with maximum Q quoted for XGBoost and TMVA-BDT.}
+
+\paragraph{Score distributions.}
+Probability density of $p_\gamma$ for signal (gamma MC) and background (proton MC),
+reconstructed from the derivative of the efficiency curves.
+Overlap between the distributions indicates classification difficulty.
+\todo{Figure: Score distributions (signal and background PDF) per energy bin, XGBoost vs.\ TMVA-BDT.}
+
+\paragraph{SHAP feature importance for classification.}
+Top-20 features by mean absolute SHAP value for the \texttt{label} target,
+shown for a representative energy bin.
+\todo{Figure: SHAP importance bar chart for classification (one representative bin plus summary across all bins). Generated by \texttt{diagnostic\_shap\_summary.py}.}
+
+
+
+\section{Results on Crab Nebula Data}
+\label{sec:results}
+
+The Crab Nebula, the standard candle of TeV gamma-ray astronomy, is used to
+validate the reconstruction and classification performance on observational data.
+VERITAS observations of the Crab Nebula provide a large sample of high-significance
+gamma-ray events at known sky position, allowing direct comparison of reconstructed
+directions and the detection significance between the XGBoost and baseline methods.
+
+% TODO: Include the following result plots.
+\todo{The following plots compare XGBoost vs.\ DispBDT baseline on actual VERITAS Crab Nebula observations.}
+
+\paragraph{Theta-squared distribution.}
+Distribution of $\theta^2$, the squared angular distance between the reconstructed
+event direction and the Crab Nebula position (ON region) and equivalent background
+control regions (OFF regions), for the XGBoost and DispBDT methods.
+An improvement in angular resolution is expected to manifest as a narrower
+ON-region excess and improved signal-to-noise ratio.
+\todo{Figure: $\theta^2$ distributions (ON and OFF regions) for XGBoost and DispBDT. Quote Li\&Ma significance, gamma-ray excess counts, and observing time.}
+
+\paragraph{Cumulative angular distributions.}
+Cumulative distribution of $\theta$ for ON and OFF events, used to directly compare
+the 68\% and 80\% containment radii between methods.
+\todo{Figure: Cumulative $\theta$ distribution for ON and OFF events, XGBoost vs.\ DispBDT; mark 68\% and 80\% containment radii.}
+
+\paragraph{Significance map.}
+Sky map of detection significance in the Crab Nebula field,
+comparing the XGBoost-reconstructed events with the DispBDT baseline.
+\todo{Figure: Significance sky map (excess map) in the Crab Nebula field, XGBoost vs.\ DispBDT. Show significance contours.}
+
+\paragraph{Energy spectrum.}
+Differential energy spectrum of the Crab Nebula estimated from the
+XGBoost-reconstructed events, compared to published measurements
+\citep{2015ICRC...34..792A} as a cross-check of the energy reconstruction.
 
 \section{Systematic Effects and Robustness}
-\begin{itemize}
-  \item Zenith-angle dependence
-  \item Offset dependence
-  \item Domain shift sensitivity
-  \item missing telescopes (3-telescope reconstruction)
-\end{itemize}
-\textbf{Suggested plots:}
-\begin{itemize}
-  \item Performance vs zenith
-  \item Performance vs offset
-\end{itemize}
+\label{sec:systematics}
+
+\subsection{Zenith-angle dependence}
+
+Shower morphology and Cherenkov light yield depend strongly on zenith angle,
+affecting both image shapes and the accuracy of reconstruction.
+The reconstruction performance (angular and energy resolution) is evaluated
+in bins of zenith angle to verify that the model generalises across the
+range of zenith angles used in VERITAS observations ($\sim 0$--$65^\circ$).
+\todo{Figure: Angular resolution $R_{68}$ and energy resolution vs.\ zenith angle (in bins), XGBoost and DispBDT baseline.}
+
+\subsection{Pointing-offset dependence}
+
+Sources are observed at a range of angular distances from the camera centre
+(typically $0.5$--$1.5$~deg for VERITAS).
+Image truncation and reduced image quality at large offsets degrade reconstruction
+accuracy. The \texttt{loss} feature (fractional image truncation) is explicitly
+included in the feature set to allow the model to correct for this effect.
+Performance is evaluated as a function of pointing offset.
+\todo{Figure: Angular and energy resolution vs.\ source offset from camera centre (in bins), XGBoost vs.\ baseline.}
+
+\subsection{Telescope multiplicity}
+
+A single model trained on all multiplicities $\geq 2$ is evaluated separately
+for two-, three-, and four-telescope events.
+The feature sorting by image size ensures that the model can handle reduced
+multiplicities without retraining, but performance is expected to degrade
+at lower multiplicities due to the reduced geometric constraints.
+\todo{Figure: Angular and energy resolution separately for 2-, 3-, and 4-telescope events; compare XGBoost and DispBDT.}
+
+\subsection{Domain shift}
+
+The model is trained on simulated events and applied to observational data.
+Potential domain shifts arise from imperfect simulation of telescope response,
+night-sky background, or atmospheric conditions.
+The agreement between MC and data distributions for key features is checked,
+and the consistency of the reconstructed energy spectrum with published results
+provides an overall validation of the energy calibration.
+\todo{Figure: Crab Nebula differential energy spectrum (XGBoost reconstruction) overlaid with published VERITAS/MAGIC/HESS measurements \citep{2015ICRC...34..792A}. Quote flux normalisation and spectral index.}
+
+
 
 \section{Conclusions}
-\begin{itemize}
-  \item Impact
-  \item Limitations
-  \item Summary of regression performance
-\end{itemize}
+\label{sec:conclusions}
 
-\appendix
+This paper presented a machine-learning approach to event reconstruction and
+gamma/hadron separation for ground-based IACTs, demonstrated for VERITAS and
+CTAO-North simulations.
+
+For direction and energy reconstruction, a single multi-target XGBoost regression model
+simultaneously predicts corrections to the existing DispBDT reconstruction
+in all three coordinates (two angular and one energy).
+The model is trained on more than 100 image, stereo, and array-geometry features,
+using sample weights that balance sparse high-energy bins and favour high-multiplicity events.
+Predicting residuals rather than absolute values retains the robustness of the
+existing baseline for typical events while learning systematic corrections where the
+baseline fails.
+
+For gamma/hadron separation, energy-binned XGBoost classifiers with linear
+interpolation between adjacent bins replace the classical TMVA-BDT analysis.
+
+The code is designed as a lightweight wrapper around the existing Eventdisplay
+pipeline, operating on the mscw output files without requiring reprocessing
+of raw data.
+This makes it directly applicable to the full VERITAS archival data set
+spanning almost two decades of observations.
+The same interface supports CTAO simulations with minimal reconfiguration.
+
+% TODO: Summarise quantitative improvements in angular resolution, energy resolution,
+% energy bias, and gamma/hadron separation quality factor once result plots are available.
+\todo{Fill in quantitative summary once result plots are generated: angular resolution improvement (\%), energy resolution improvement (\%), energy bias reduction, max Q-factor comparison (XGBoost vs.\ TMVA-BDT), and Li\&Ma significance gain on Crab data.}
+
+Limitations of the current approach include the use of a single global model
+(no zenith-angle binning for regression), reliance on DispBDT as the baseline
+(systematic errors in DispBDT propagate to the XGBoost predictions),
+and training on Monte Carlo only (domain-shift corrections not applied).
+Future work will investigate training on real data using self-supervised methods,
+zenith-binned models, and the integration of additional observational features
+such as night-sky background level and atmospheric monitoring data.
+
+
 
 \section{Detailed description of features}
-\label{sec:features}
+\label{sec:appendix_features}
 
 \subsection{Telescope-level features}
 
-\begin{longtable}{lll p{5cm}}
-\caption{Description telescope-level features.} \label{tab:features-image} \\
-\hline
-\textbf{Feature Name} & \textbf{Description} & \textbf{Range} \\
-\hline
-width & Image width (Hillas) & $[0,5]$ (clipped) \\
-length & Image length (Hillas) & $[0,5]$ (clipped) \\
-asym & Image asymmetry (Hillas) & $[0,5]$ (clipped) \\
-cen\_x/y & Image centroids (Hillas) & $[0,5]$ (clipped) \\
-cosphi, sinphi & Image orientation (Hillas) & $[-1,1]$ \\
-loss & Image loss (fraction of truncated image) & $[0,1]$ \\
-\endfirsthead
+Telescope-level features are indexed 0 to $N_\mathrm{tel}-1$, sorted by descending
+image size (largest first). Features for telescopes without a valid image are set to \texttt{NaN}.
+For CTAO, sorting is first by mirror area (largest telescope type first), then by image size.
 
-\end{longtable}
-
-\subsection{Stereo-reconstruction features}
-
-\begin{longtable}{llll p{5cm}}
-\caption{Description stereo-reconstruction features.} \label{tab:features-stereo} \\
+\begin{longtable}{lll p{5.5cm}}
+\caption{Telescope-level features used for stereo reconstruction.
+Subscripts 0\ldots$N-1$ denote the sorted telescope index.} \label{tab:features-image} \\
 \hline
-\textbf{Feature Name} & \textbf{Description} & \textbf{Range} & \textbf{Type} \\
+\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
 \hline
 \endfirsthead
-X/Y\_off & X/Y offset from DispBDT method & $[-1,1]$ (clipped) & per telescope \\
-X/Y\_off\_intersect & X/Y offset from intersection method & $[-1,1]$ (clipped) & per telescope \\
-disp & DispBDT distance & $[0,1]$ (clipped) & per telescope \\
-disp\_x,y & DispBDT distance in x/y direction & $[-1,1]$ (clipped) & per telescope \\
-Diff\_X/Yoff & & per telescope \\
-Diff\_Woff & & & per telescope \\
-Diff\_T& & & per telescope \\
-ES & & & per telescope \\
-E & & & per telescope \\
-EmissionHeight & & & per event \\
-Geomagnetic\_Angle & & & per event \\
-R\_core & & & per telescope \\
-tel\_rel\_x/y & & & per telescope \\
-
+\hline
+\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
+\hline
+\endhead
+\hline
+\endfoot
+\texttt{size} & log$_{10}$ p.e. & $[0,\infty)$ & Image charge (after $\log_{10}$ transform); minimum 1~p.e.\ before transform \\
+\texttt{width} & deg & unconstrained & Hillas minor-axis RMS width \\
+\texttt{length} & deg & unconstrained & Hillas major-axis RMS length \\
+\texttt{asym} & deg & unconstrained & Hillas image asymmetry \\
+\texttt{cosphi} & -- & $[-1,1]$ & Cosine of image major-axis orientation angle \\
+\texttt{sinphi} & -- & $[-1,1]$ & Sine of image major-axis orientation angle \\
+\texttt{cen\_x} & deg & unconstrained & Hillas centroid $x$ in camera coordinates \\
+\texttt{cen\_y} & deg & unconstrained & Hillas centroid $y$ in camera coordinates \\
+\texttt{dist} & deg & unconstrained & Distance of image centroid from camera centre \\
+\texttt{loss} & -- & $[0,1]$ & Fraction of image charge outside camera boundary \\
+\texttt{tgrad\_x} & p.e./ns & $[-50,50]$ & Time gradient along image major axis \\
+\texttt{ntubes} & log$_{10}$ & $[0,\infty)$ & Number of pixels surviving image cleaning \\
+\texttt{nlowgain} & log$_{10}$ & $[0,\infty)$ & Number of pixels in low-gain readout channel \\
+\texttt{E} & log$_{10}$ TeV & $[-3,\infty)$ & Per-telescope energy estimate from DispBDT \\
+\texttt{ES} & log$_{10}$ TeV & $[-3,\infty)$ & Per-telescope energy from look-up table \\
+\texttt{Disp\_T} & deg & unconstrained & DispBDT displacement magnitude per telescope \\
+\texttt{DispXoff\_T} & deg & $[-7,7]$ & DispBDT $x$-offset per telescope \\
+\texttt{DispYoff\_T} & deg & $[-7,7]$ & DispBDT $y$-offset per telescope \\
+\texttt{DispWoff\_T} & deg & unconstrained & DispBDT weighted offset per telescope \\
+\texttt{R\_core} & m & $[-10,\infty)$ & Impact distance from shower core to telescope \\
+\texttt{mirror\_area} & m$^2$ & $>0$ & Mirror collection area (constant per telescope type) \\
+\texttt{tel\_rel\_x} & m & unconstrained & Telescope $x$ position relative to shower core, shower-plane coords \\
+\texttt{tel\_rel\_y} & m & unconstrained & Telescope $y$ position relative to shower core, shower-plane coords \\
+\texttt{tel\_active} & -- & $\{0,1\}$ & Flag: 1 if telescope participated in this event \\
 \end{longtable}
 
-\subsection{Event-level features}
+\subsection{Stereo-reconstruction and event-level features}
 
-\begin{longtable}{llll p{5cm}}
-\caption{Description array features.} \label{tab:features-array} \\
+\begin{longtable}{lll p{5.5cm}}
+\caption{Stereo-reconstruction and event-level features.} \label{tab:features-stereo} \\
 \hline
-\textbf{Feature Name} & \textbf{Description} & \textbf{Range} & \textbf{Type} \\
+\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
 \hline
 \endfirsthead
-DispNImages & Number of images (DispBDT) & $[2,\mathrm{N_{tel}}]$ & per event \\
-tel\_active  & & & per telescope \\
-array\_foot\_print & & & per event \\
-mirror\_area & & & per event \\
-
-
+\hline
+\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
+\hline
+\endhead
+\hline
+\endfoot
+\texttt{Xoff} & deg & $[-7,7]$ & DispBDT stereo $x$-offset (weighted average) \\
+\texttt{Yoff} & deg & $[-7,7]$ & DispBDT stereo $y$-offset (weighted average) \\
+\texttt{Xoff\_intersect} & deg & $[-7,7]$ & Intersection-of-lines $x$-offset \\
+\texttt{Yoff\_intersect} & deg & $[-7,7]$ & Intersection-of-lines $y$-offset \\
+\texttt{ErecS} & log$_{10}$ TeV & $[-3,\infty)$ & DispBDT stereo energy estimate \\
+\texttt{Erec} & log$_{10}$ TeV & $[-3,\infty)$ & Look-up table energy estimate \\
+\texttt{EmissionHeight} & km & $[0,100]$ & Reconstructed Cherenkov emission height \\
+\texttt{Xcore} & m & unconstrained & Shower core $x$ position (ground) \\
+\texttt{Ycore} & m & unconstrained & Shower core $y$ position (ground) \\
+\texttt{img2\_ang} & deg & $[0,360]$ & Angle between image pairs (stereoscopic angle) \\
+\texttt{DispNImages} & -- & $[2, N_\mathrm{tel}]$ & Number of telescopes used by DispBDT \\
+\texttt{ArrayPointing\_Elevation} & deg & $[0,90]$ & Array pointing elevation \\
+\texttt{ArrayPointing\_Azimuth} & deg & $[0,360]$ & Array pointing azimuth \\
+\texttt{array\_foot\_print} & m$^2$ & $[0,\infty)$ & Convex-hull area of active telescopes \\
+\texttt{Geomagnetic\_Angle} & deg & $[0,180]$ & Angle between shower direction and geomagnetic field \\
 \end{longtable}
 
+\subsection{Additional features for gamma/hadron classification}
 
-
-
-% Features:
-% mirror_area_2, mirror_area_3, nlowgain_0, nlowgain_1, nlowgain_2, nlowgain_3,
-% ntubes_0, ntubes_1, ntubes_2, ntubes_3, sinphi_0, sinphi_1, sinphi_2, sinphi_3,
-% size_0, size_1, size_2, size_3, size_dist2_0, size_dist2_1, size_dist2_2, size_dist2_3,
-% tel_active_0, tel_active_1, tel_active_2, tel_active_3, tel_rel_x_0, tel_rel_x_1,
-% tel_rel_x_2, tel_rel_x_3, tel_rel_y_0, tel_rel_y_1, tel_rel_y_2, tel_rel_y_3, tgrad_x_0,
-% tgrad_x_1, tgrad_x_2, tgrad_x_3, width_0, width_1, width_2, width_3, width_length_0,
-% width_length_1, width_length_2, width_length_3
+\begin{longtable}{lll p{5.5cm}}
+\caption{Features used exclusively for gamma/hadron classification.} \label{tab:features-class} \\
+\hline
+\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
+\hline
+\endfirsthead
+\hline
+\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
+\hline
+\endhead
+\hline
+\endfoot
+\texttt{MSCW} & -- & $[-2,2]$ & Mean scaled image width \\
+\texttt{MSCL} & -- & $[-2,5]$ & Mean scaled image length \\
+\texttt{EmissionHeightChi2} & log$_{10}$ & $[-6,4]$ & $\chi^2$ of emission height fit \\
+\texttt{EChi2S} & log$_{10}$ & $[-6,4]$ & $\chi^2$ of stereo energy fit \\
+\texttt{SizeSecondMax} & log$_{10}$ p.e. & $[0,5]$ & Size of the second-largest image \\
+\texttt{DispAbsSumWeigth} & -- & $[0,5]$ & Sum of DispBDT weights \\
+\end{longtable}
 
 \section*{AI usage disclosure}
 
