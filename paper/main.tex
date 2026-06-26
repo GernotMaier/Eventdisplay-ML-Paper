@@ -73,7 +73,6 @@
 \setlength{\parindent}{0pt}
 
 
-% Title and author information
 \title{Residual and ensemble regression for improved reconstruction of high-energy gamma-ray events}
 \author{Gernot Maier}
 \date{\today}
@@ -83,39 +82,38 @@
 \maketitle
 
 \begin{abstract}
-We present a machine-learning approach to event reconstruction and gamma/hadron
-separation for imaging atmospheric Cherenkov telescopes (IACTs), implemented as a
-thin layer on top of established analysis pipelines.
-For reconstruction, a single XGBoost model performs multi-target residual regression,
-simultaneously correcting the event direction (two angular components) and energy
-predicted by classical methods, using more than 100 image and stereo features.
-For gamma/hadron separation, energy-binned XGBoost classifiers are trained on
-Monte Carlo simulations of gamma-ray and proton-initiated air showers.
+We present a machine-learning approach to event reconstruction
+for imaging atmospheric Cherenkov telescopes (IACTs) such as VERITAS and
+CTAO.
+A single XGBoost model acts as a thin layer on top of established methods and
+corrects simultaneously energy and direction using multi-target residual regression.
+Features are image and stereo parameters based mostly on classical methods like
+the Hillas parameters or mean-reduced scaled parameters calculated from MC-trained
+lookup tables.
 The method is validated on VERITAS data and on simulations of the Cherenkov Telescope
-Array Observatory (CTAO) Northern array.
-Performance is evaluated on simulated events and on Crab Nebula observations,
-demonstrating improvements in angular and energy resolution over the baseline.
+Array Observatory (CTAO) showing a significant improvement in angular and energy
+resolution compared to the baseline reconstruction methods.
 \end{abstract}
 
 \section{Introduction}
 
-Gamma-ray astronomy uses Imaging Atmospheric Cherenkov Telescopes (IACTs)
+Imaging Atmospheric Cherenkov Telescopes (IACTs) enable Gamma-ray astronomy
 to measure the energy and direction of photons from
-tens of GeV to hundreds of TeV (e.g., \citep{2009ARA&A..47..523H}).
-The telescopes record Cherenkov light from air showers using
-large reflectors, pixelated cameras combined with fast electronics and trigger systems.
+ tens of GeV to hundreds of TeV (e.g., \citep{2009ARA&A..47..523H}).
+The telescopes record Cherenkov light from air showers with
+large reflectors, pixelated cameras, fast electronics, and trigger systems.
 Modern observatories measure projections of the longitudinal development of air showers
 with multiple telescopes simultaneously,
 enabling stereoscopic reconstruction of primary direction and energy.
 The accuracy of this technique is limited by intrinsic air-shower fluctuations and
 telescope photon-detection efficiency to estimated
-1 (0.3) arcmin angular resolution at 100 GeV (1 TeV)
+1 (0.3) arcmin angular resolution at energies of 100 GeV (1 TeV)
 \citep{hofmann2006performancelimitscherenkovinstruments}.
 Systematic uncertainties from varying observation conditions (e.g., night-sky background light,
 atmospheric conditions) further limit the achievable performance and require robust
 reconstruction methods.
 
-The field knows a variety of reconstruction methods for direction and energy estimation,
+The different groups operating IACTs have developed a variety of reconstruction methods for direction and energy estimation,
 including robust and efficient geometric methods based on image parameters
 \citep{1985ICRC....3..445H, 1997APh.....8....1D, 1999APh....12..135H},
 template-model based methods \citep{2001A&A...374..895P,2006APh....25..195L, 2009APh....32..231D,2014APh....56...26P},
@@ -123,6 +121,7 @@ and machine-learning-based methods using
 Hillas parameters \citep{2024A&A...691A.328A} or full camera images.
 Performance varies across methods, with template-model based algorithms achieving
 the highest precision at the cost of computational complexity and robustness.
+\todo{Missing citations for FreePact / full image methods.}
 
 This paper shows that a lightweight machine-learning regression layer
 using the XGBoost library \citep{Chen:2016:XST:2939672.2939785}
@@ -130,7 +129,7 @@ can improve the performance of existing image-parameter-based
 reconstruction methods.
 The method implements \textit{residual regression}: rather than predicting direction
 and energy directly, a single multi-target XGBoost model learns the corrections
-(residuals) to the existing DispBDT reconstruction, effectively combining the robustness
+(residuals) to an existing baseline reconstruction, effectively combining the robustness
 of the baseline method with the flexibility of gradient-boosted trees.
 For gamma/hadron separation, energy-binned XGBoost classifiers replace the
 TMVA-based BDTs used in the classical analysis.
