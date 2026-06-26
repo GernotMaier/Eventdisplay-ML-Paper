@@ -83,14 +83,11 @@
 \maketitle
 
 \begin{abstract}
-We present a machine-learning approach to event reconstruction and gamma/hadron
-separation for imaging atmospheric Cherenkov telescopes (IACTs), implemented as a
+We present a machine-learning approach to event reconstruction for imaging atmospheric Cherenkov telescopes (IACTs), implemented as a
 thin layer on top of established analysis pipelines.
 For reconstruction, a single XGBoost model performs multi-target residual regression,
 simultaneously correcting the event direction (two angular components) and energy
 predicted by classical methods, using more than 100 image and stereo features.
-For gamma/hadron separation, energy-binned XGBoost classifiers are trained on
-Monte Carlo simulations of gamma-ray and proton-initiated air showers.
 The method is validated on VERITAS data and on simulations of the Cherenkov Telescope
 Array Observatory (CTAO) Northern array.
 Performance is evaluated on simulated events and on Crab Nebula observations,
@@ -132,8 +129,6 @@ The method implements \textit{residual regression}: rather than predicting direc
 and energy directly, a single multi-target XGBoost model learns the corrections
 (residuals) to the existing DispBDT reconstruction, effectively combining the robustness
 of the baseline method with the flexibility of gradient-boosted trees.
-For gamma/hadron separation, energy-binned XGBoost classifiers replace the
-TMVA-based BDTs used in the classical analysis.
 The explicit goal is to apply these models to archival data spanning almost two
 decades of VERITAS \citep{2006APh....25..391H} observations
 without requiring a complete re-write of the analysis code or low-level reprocessing
@@ -150,7 +145,6 @@ The paper is structured as follows:
 Section~\ref{sec:features_and_targets} describes the data pipeline, feature engineering,
 and regression targets.
 Section~\ref{sec:regression} presents the regression model architecture and training strategy.
-Section~\ref{sec:classification} describes the gamma/hadron classification model.
 Section~\ref{sec:performance} evaluates performance on simulated events,
 and Section~\ref{sec:results} presents results on Crab Nebula data.
 Section~\ref{sec:systematics} discusses systematic effects and robustness.
@@ -418,107 +412,11 @@ identify energy-dependent feature importance.
 
 
 
-\section{Gamma/Hadron Separation}
-\label{sec:classification}
-
-\subsection{Model architecture}
-
-Gamma/hadron separation is implemented as a binary XGBoost classifier
-(\texttt{XGBClassifier}, objective \texttt{binary:logistic})
-that assigns each event a probability $p_\gamma \in [0,1]$ of being
-a gamma-ray-initiated shower.
-Because the classification problem is energy-dependent (shower morphology and
-background composition change strongly with energy), separate models are trained
-in nine energy bins spanning $\log_{10}(E_\mathrm{rec}/\mathrm{TeV}) \in [-2, 2.5]$.
-During application, adjacent bin models are interpolated linearly in
-$\log_{10}(E_\mathrm{rec})$ using interpolation weights $\alpha$:
-\begin{equation}
-  p_\gamma = (1 - \alpha)\, p_{\gamma,\mathrm{lo}} + \alpha\, p_{\gamma,\mathrm{hi}}.
-\end{equation}
-
-The classification features are a subset of the reconstruction features
-(Hillas parameters, reduced stereo quantities, MSCW/MSCL shape parameters)
-listed in Appendix~\ref{sec:appendix_features}.
-The energy estimate is used only for binning and is not a classifier input.
-
-Hyperparameters for the classifier are listed in Table~\ref{tab:hyperparameters_cls}.
-A lower tree depth (4) compared to the regression model avoids overfitting given the
-binary label noise inherent in hadronic background samples.
-
-\begin{table}[h]
-\centering
-\caption{XGBoost classification hyperparameters.}
-\label{tab:hyperparameters_cls}
-\begin{tabular}{ll}
-\toprule
-\textbf{Parameter} & \textbf{Value} \\
-\midrule
-\texttt{objective}           & \texttt{binary:logistic} \\
-\texttt{eval\_metric}        & log-loss, AUC \\
-\texttt{n\_estimators}       & 5\,000 (with early stopping) \\
-\texttt{early\_stopping\_rounds} & 100 \\
-\texttt{learning\_rate}      & 0.02 \\
-\texttt{max\_depth}          & 4 \\
-\texttt{gamma}               & 0.2 \\
-\texttt{subsample}           & 0.8 \\
-\texttt{colsample\_bytree}   & 0.6 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Signal efficiency and hadron rejection}
-
-The classifier output $p_\gamma$ is converted to a binary label by applying a
-threshold $t_\gamma$ calibrated to a target signal efficiency
-(e.g., $\epsilon_\gamma = 80\%$).
-The threshold is determined from the signal and background efficiency curves
-computed on the test sample.
-Thresholds at a range of signal efficiencies (20\%--95\% in 5\% steps) are
-stored with the trained model for flexible analysis cuts.
-The classification performance is also characterised by the ROC curve
-(gamma efficiency vs.\ hadron rejection $1 - \epsilon_h$),
-the Q-factor $Q = \epsilon_\gamma / \sqrt{\epsilon_h}$,
-and the distribution of the classifier score for signal and background.
-
-\subsection{Diagnostic checks for classification}
-
-\todo{The following plots are generated by \texttt{plot\_classification\_performance\_metrics.py}. Produce one figure per energy bin (9 bins) plus one combined summary figure.}
-
-\paragraph{Signal and background efficiency curves.}
-Signal efficiency $\epsilon_\gamma(t)$ and background efficiency $\epsilon_h(t)$
-as a function of the classifier threshold $t$,
-shown for each energy bin and for the XGBoost and TMVA-BDT classifiers.
-\todo{Figure: $\epsilon_\gamma$ and $\epsilon_h$ vs.\ threshold, XGBoost (dashed) vs.\ TMVA-BDT (solid), one panel per energy bin.}
-
-\paragraph{ROC curve.}
-$\epsilon_\gamma$ vs.\ $1 - \epsilon_h$ for each energy bin,
-with the AUC value quoted as a summary metric.
-\todo{Figure: ROC curves per energy bin, XGBoost vs.\ TMVA-BDT; AUC values in legend.}
-
-\paragraph{Q-factor curve.}
-$Q(\epsilon_\gamma) = \epsilon_\gamma / \sqrt{\epsilon_h}$ as a function of gamma efficiency,
-for each energy bin.
-The maximum Q-factor provides a single-number comparison between classifiers.
-\todo{Figure: Q-factor vs.\ $\epsilon_\gamma$ per energy bin, with maximum Q quoted for XGBoost and TMVA-BDT.}
-
-\paragraph{Score distributions.}
-Probability density of $p_\gamma$ for signal (gamma MC) and background (proton MC),
-reconstructed from the derivative of the efficiency curves.
-Overlap between the distributions indicates classification difficulty.
-\todo{Figure: Score distributions (signal and background PDF) per energy bin, XGBoost vs.\ TMVA-BDT.}
-
-\paragraph{SHAP feature importance for classification.}
-Top-20 features by mean absolute SHAP value for the \texttt{label} target,
-shown for a representative energy bin.
-\todo{Figure: SHAP importance bar chart for classification (one representative bin plus summary across all bins). Generated by \texttt{diagnostic\_shap\_summary.py}.}
-
-
-
 \section{Results on Crab Nebula Data}
 \label{sec:results}
 
 The Crab Nebula, the standard candle of TeV gamma-ray astronomy, is used to
-validate the reconstruction and classification performance on observational data.
+validate the reconstruction performance on observational data.
 VERITAS observations of the Crab Nebula provide a large sample of high-significance
 gamma-ray events at known sky position, allowing direct comparison of reconstructed
 directions and the detection significance between the XGBoost and baseline methods.
@@ -595,8 +493,7 @@ provides an overall validation of the energy calibration.
 \section{Conclusions}
 \label{sec:conclusions}
 
-This paper presented a machine-learning approach to event reconstruction and
-gamma/hadron separation for ground-based IACTs, demonstrated for VERITAS and
+This paper presented a machine-learning approach to event reconstruction for ground-based IACTs, demonstrated for VERITAS and
 CTAO-North simulations.
 
 For direction and energy reconstruction, a single multi-target XGBoost regression model
@@ -608,9 +505,6 @@ Predicting residuals rather than absolute values retains the robustness of the
 existing baseline for typical events while learning systematic corrections where the
 baseline fails.
 
-For gamma/hadron separation, energy-binned XGBoost classifiers with linear
-interpolation between adjacent bins replace the classical TMVA-BDT analysis.
-
 The code is designed as a lightweight wrapper around the existing Eventdisplay
 pipeline, operating on the mscw output files without requiring reprocessing
 of raw data.
@@ -619,8 +513,8 @@ spanning almost two decades of observations.
 The same interface supports CTAO simulations with minimal reconfiguration.
 
 % TODO: Summarise quantitative improvements in angular resolution, energy resolution,
-% energy bias, and gamma/hadron separation quality factor once result plots are available.
-\todo{Fill in quantitative summary once result plots are generated: angular resolution improvement (\%), energy resolution improvement (\%), energy bias reduction, max Q-factor comparison (XGBoost vs.\ TMVA-BDT), and Li\&Ma significance gain on Crab data.}
+% and energy bias once result plots are available.
+\todo{Fill in quantitative summary once result plots are generated: angular resolution improvement (\%), energy resolution improvement (\%), energy bias reduction, and Li\&Ma significance gain on Crab data.}
 
 Limitations of the current approach include the use of a single global model
 (no zenith-angle binning for regression), reliance on DispBDT as the baseline
@@ -709,28 +603,6 @@ Subscripts 0\ldots$N-1$ denote the sorted telescope index.} \label{tab:features-
 \texttt{ArrayPointing\_Azimuth} & deg & $[0,360]$ & Array pointing azimuth \\
 \texttt{array\_foot\_print} & m$^2$ & $[0,\infty)$ & Convex-hull area of active telescopes \\
 \texttt{Geomagnetic\_Angle} & deg & $[0,180]$ & Angle between shower direction and geomagnetic field \\
-\end{longtable}
-
-\subsection{Additional features for gamma/hadron classification}
-
-\begin{longtable}{lll p{5.5cm}}
-\caption{Features used exclusively for gamma/hadron classification.} \label{tab:features-class} \\
-\hline
-\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
-\hline
-\endfirsthead
-\hline
-\textbf{Feature} & \textbf{Unit} & \textbf{Range (clipped)} & \textbf{Description} \\
-\hline
-\endhead
-\hline
-\endfoot
-\texttt{MSCW} & -- & $[-2,2]$ & Mean scaled image width \\
-\texttt{MSCL} & -- & $[-2,5]$ & Mean scaled image length \\
-\texttt{EmissionHeightChi2} & log$_{10}$ & $[-6,4]$ & $\chi^2$ of emission height fit \\
-\texttt{EChi2S} & log$_{10}$ & $[-6,4]$ & $\chi^2$ of stereo energy fit \\
-\texttt{SizeSecondMax} & log$_{10}$ p.e. & $[0,5]$ & Size of the second-largest image \\
-\texttt{DispAbsSumWeigth} & -- & $[0,5]$ & Sum of DispBDT weights \\
 \end{longtable}
 
 \section*{AI usage disclosure}

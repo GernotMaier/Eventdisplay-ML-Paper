@@ -40,7 +40,7 @@ repos:
     args: [
     "--write-changes",
     "--skip=*.json,*.bib,*.txt,*.cls,scripts/environment_vtscat_save.yml",
-    "--ignore-words-list=livetime,fom,rsource,gaus,precess,forbit,nd,precessed,crate,parms,safty,sideral,ist,highe,functon,tre,ned,sourc,parm,fo,coo,miror",
+    "--ignore-words-list=livetime,fom,rsource,gaus,precess,forbit,nd,precessed,crate,parms,safty,sideral,ist,highe,functon,tre,ned,sourc,parm,fo,coo,miror,aas",
     ]
     additional_dependencies:
       - tomli
