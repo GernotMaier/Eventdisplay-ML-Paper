@@ -1,4 +1,4 @@
-# Makefile for compiling LaTeX documents
+# Makefile for compiling the stereo_reconstruction document
 MAIN = main
 LATEX = pdflatex
 BIBTEX = bibtex
@@ -13,12 +13,10 @@ $(PDF): $(MAIN).tex ../bibliography/bibliography.bib
 	$(LATEX) $(MAIN)
 	$(LATEX) $(MAIN)
 
-# Clean auxiliary files
 .PHONY: clean
 clean:
 	rm -f *.aux *.log *.out *.bbl *.blg *.toc *.lof *.lot *.fls *.fdb_latexmk *.synctex.gz *.pdf
 
-# Clean all generated files including PDF
 .PHONY: distclean
 distclean: clean
 	rm -f $(PDF)
