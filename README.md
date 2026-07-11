@@ -8,26 +8,24 @@ Eventdisplay-ML is a machine learning extension for the Eventdisplay framework, 
 
 The repository contains two LaTeX documents:
 
-- `stereo-reconstruction-paper/`: the main paper. This paper is in the writing phase and is scoped to stereo reconstruction of direction and energy.
-- `classification-note/`: a separate note holding the gamma/hadron separation material that was moved out of the main paper.
+- `stereo-reconstruction/`: describing the stereo reconstruction of gamma-ray events
+- `classification/`: describing the classification of gamma-ray events
 
 ## Building
 
 Build the stereo-reconstruction paper:
 
 ```sh
-cd stereo-reconstruction-paper
+cd stereo-reconstruction
 make
 ```
 
-Build the classification note:
+Build the classification:
 
 ```sh
-cd classification-note
+cd classification
 make
 ```
-
-Generated LaTeX build products, including PDFs, are ignored by Git.
 
 ## License
 
