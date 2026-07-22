@@ -1,0 +1,10 @@
+name: eventdisplay-ml-paper
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python
+  - matplotlib
+  - numpy
+  - uproot
