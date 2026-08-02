@@ -7,4 +7,8 @@ dependencies:
   - python
   - matplotlib
   - numpy
+  - pre-commit
+  - scipy
   - uproot
+
+# install: conda env update -f environment.yml --prune
