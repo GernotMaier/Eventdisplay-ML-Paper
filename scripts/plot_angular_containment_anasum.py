@@ -3,7 +3,7 @@
 
 Data are read from the background-subtracted ``htheta2Erec_diff`` histogram
 written by anasum.  MC curves are derived from the reconstructed-energy
-``hAngularLogDiff_2D`` histogram stored in the serialized IRF tree.
+``hAngularLogDiff_2D`` histogram stored in the IRF tree.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Compare 68% and 95% angular containment from one or more anasum files "
-            "with the corresponding fEffArea IRF curves."
+            "with curves derived from the corresponding IRF objects."
         )
     )
     parser.add_argument(
@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         required=True,
         metavar="IRF_FILE",
-        help="matching instrument-response files containing fEffArea",
+        help="matching IRF files containing the angular-resolution histogram",
     )
     parser.add_argument(
         "--labels",
@@ -99,7 +99,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mc-tree",
         default=DEFAULT_MC_TREE,
-        help=f"serialized IRF tree containing hAngularLogDiff_2D (default: {DEFAULT_MC_TREE})",
+        help=f"IRF tree containing hAngularLogDiff_2D (default: {DEFAULT_MC_TREE})",
     )
     parser.add_argument(
         "--mc-entry",
@@ -250,6 +250,8 @@ def _read_histogram(
             f"counts={counts.shape}, variances={variances.shape}, "
             f"expected={expected_shape}"
         )
+    if not np.all(np.isfinite(energy_edges)) or not np.all(np.diff(energy_edges) > 0):
+        raise ValueError("The energy axis must have finite, increasing edges")
     if theta_edges[0] < 0 or not np.all(np.diff(theta_edges) > 0):
         raise ValueError("The theta axis must have increasing, non-negative edges")
     if not np.all(np.isfinite(counts)):
@@ -316,7 +318,7 @@ def read_mc_histogram(
                 f"(entries: {tree.num_entries})"
             )
         if "IRF" not in tree.keys():
-            raise KeyError(f"Tree {tree_name!r} has no serialized IRF branch")
+            raise KeyError(f"Tree {tree_name!r} has no IRF branch")
         irf = tree["IRF"].array(
             entry_start=mc_entry, entry_stop=mc_entry + 1, library="np"
         )[0]
@@ -339,6 +341,12 @@ def read_mc_histogram(
         raise ValueError(
             f"MC histogram counts and variances have different shapes in {root_file}"
         )
+    if not np.all(np.isfinite(energy_edges)) or not np.all(np.diff(energy_edges) > 0):
+        raise ValueError(f"hAngularLogDiff_2D in {root_file} has invalid energy edges")
+    if not np.all(np.isfinite(log_theta_edges)) or not np.all(
+        np.diff(log_theta_edges) > 0
+    ):
+        raise ValueError(f"hAngularLogDiff_2D in {root_file} has invalid theta edges")
     if not np.all(np.isfinite(values)) or np.any(values < 0):
         raise ValueError(f"hAngularLogDiff_2D in {root_file} contains invalid counts")
     if not np.all(np.isfinite(variances)) or np.any(variances < 0):
@@ -672,6 +680,8 @@ def distribution_from_data(
         raise ValueError(
             "--energy-bin requires a fitted method (double-gaussian or king)"
         )
+    if not data.theta_squared:
+        raise ValueError("PSF fitting requires a theta-squared histogram")
     if max_theta2 is not None:
         coordinate_limit = max_theta2 if data.theta_squared else np.sqrt(max_theta2)
     elif max_theta_deg is None:

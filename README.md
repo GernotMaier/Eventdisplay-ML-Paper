@@ -68,6 +68,45 @@ dashed MC distributions. MC legend entries are labeled accordingly. Use
 `--help` to see all options. PDF output is recommended for inclusion in the
 paper; PNG and SVG are also supported.
 
+### anasum / IRF comparison
+
+`plot_angular_containment_anasum.py` compares background-subtracted anasum
+data with MC containment derived from the IRF's
+`hAngularLogDiff_2D` histogram. It does not use the precomputed angular-
+resolution branches in `fEffArea`. Give one anasum file and one matching IRF
+file for each reconstruction:
+
+```sh
+cd scripts
+python ./plot_angular_containment_anasum.py \
+    ../tmp-data/anasum_tmva.root ../tmp-data/anasum_xgb.root \
+    --mc-files ../tmp-data/eff_area_tmva.root ../tmp-data/eff_area_xgb.root \
+    --labels TMVA XGB \
+    --ylim 0. 0.4 \
+    --energy-bin 10 \
+    --max-theta 0.5 \
+    --energy-rebin 2 \
+    --energy-range -1. 1.5
+```
+
+By default, the data histogram is
+`total_1/stereo/stereoParameterHistograms/htheta2Erec_diff`; it must be a TH2
+with reconstructed log-energy on x, theta-squared on y, and stored bin
+variances. The script fits each energy bin up to 0.5 degrees with a
+double-Gaussian PSF and reports 68% and 95% radii for the fitted source
+component. Use `--method king` for a King-profile fit or `--method cumulative`
+for non-parametric containment of the signed excess. `--max-theta` and
+`--max-theta2` set the fit range; `--energy-rebin` combines adjacent data
+energy bins only.
+
+For a fit diagnostic, add `--energy-bin INDEX` to show the data distribution
+and fitted PSF for that zero-based (and, if rebinned, rebinned) data bin.
+Uncertainties for fitted data radii are 68% intervals propagated from the fit
+covariance using reproducible parameter toys. The MC curves are fitted from
+their histogram but currently have no uncertainty bands. `--mc-entry` selects
+the IRF-tree entry (normally an azimuth bin). Use `--mc-tree` or
+`--data-histogram` only when the ROOT object paths differ from the defaults.
+
 ## License
 
 This work is licensed under a Creative Commons Attribution 4.0 International License (CC BY 4.0). See the [LICENSE](LICENSE) file for details.
