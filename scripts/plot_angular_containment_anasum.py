@@ -22,7 +22,7 @@ DEFAULT_DATA_HISTOGRAM = "total_1/stereo/stereoParameterHistograms/htheta2Erec_d
 DEFAULT_MC_TREE = "t_angular_resolution"
 MC_LOGDIFF_HISTOGRAM_INDEX = 2  # E_LOGDIFF, hAngularLogDiff_2D
 DEFAULT_MC_P68_BRANCH = "Rec_angRes_p68"
-DEFAULT_MC_P95_BRANCH = "Rec_angRes_p80"
+DEFAULT_MC_P80_BRANCH = "Rec_angRes_p80"
 DEFAULT_MAX_THETA_DEG = 0.5
 CONTAINMENT_LEVELS = (0.68, 0.95)
 DEFAULT_BOOTSTRAP_SAMPLES = 5000
@@ -403,7 +403,7 @@ def read_mc(
     energy_is_log10: bool | None = None,
     mc_entry: int = 0,
 ) -> ContainmentResult:
-    """Read one fEffArea IRF row and its p68/p95 angular resolutions.
+    """Read one fEffArea IRF row and its p68/p80 angular resolutions.
 
     fEffArea files produced by Eventdisplay do not have a standalone energy
     branch.  Their reconstructed-energy centers are stored in the variable-
@@ -446,10 +446,10 @@ def read_mc(
         p68_name = _branch_name(
             available, DEFAULT_MC_P68_BRANCH, (DEFAULT_MC_P68_BRANCH,), "68% resolution"
         )
-        p95_name = _branch_name(
-            available, DEFAULT_MC_P95_BRANCH, (DEFAULT_MC_P95_BRANCH,), "95% resolution"
+        p80_name = _branch_name(
+            available, DEFAULT_MC_P80_BRANCH, (DEFAULT_MC_P80_BRANCH,), "80% resolution"
         )
-        branch_names = [p68_name, p95_name]
+        branch_names = [p68_name, p80_name]
         if energy_name is None:
             for metadata_name in ("Rec_e0", "Rec_nbins"):
                 if metadata_name not in available:
@@ -469,15 +469,15 @@ def read_mc(
         if energy_name is None:
             energy = np.asarray(arrays["Rec_e0"][0], dtype=float)
             p68 = np.asarray(arrays[p68_name][0], dtype=float)
-            p95 = np.asarray(arrays[p95_name][0], dtype=float)
+            p80 = np.asarray(arrays[p80_name][0], dtype=float)
             energy_is_log10 = True
         else:
             energy = np.asarray(arrays[energy_name][0], dtype=float)
             p68 = np.asarray(arrays[p68_name][0], dtype=float)
-            p95 = np.asarray(arrays[p95_name][0], dtype=float)
+            p80 = np.asarray(arrays[p80_name][0], dtype=float)
             title = _branch_title(tree, energy_name)
 
-    if not (energy.shape == p68.shape == p95.shape) or energy.ndim != 1:
+    if not (energy.shape == p68.shape == p80.shape) or energy.ndim != 1:
         raise ValueError(
             f"MC branches in entry {mc_entry} of {root_file} do not contain "
             "matching 1D arrays"
@@ -494,16 +494,14 @@ def read_mc(
         energy = np.log10(energy)
     if not np.all(np.isfinite(energy)):
         raise ValueError("MC energy values contain non-finite values")
-    for name, values in ((p68_name, p68), (p95_name, p95)):
+    for name, values in ((p68_name, p68), (p80_name, p80)):
         if not np.all(np.isfinite(values)) or np.any(values < 0):
             raise ValueError(f"MC branch {name!r} contains invalid angular resolutions")
 
     order = np.argsort(energy)
     energy = energy[order]
-    radii = {0.68: p68[order], 0.95: p95[order]}
-    uncertainties = {
-        level: np.full((2, energy.size), np.nan) for level in CONTAINMENT_LEVELS
-    }
+    radii = {0.68: p68[order], 0.80: p80[order]}
+    uncertainties = {level: np.full((2, energy.size), np.nan) for level in radii}
     return ContainmentResult(energy, radii, uncertainties)
 
 
