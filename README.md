@@ -64,9 +64,14 @@ By default, the data histogram is
 `total_1/stereo/stereoParameterHistograms/htheta2Erec_diff`; it must be a TH2
 with reconstructed log-energy on x, theta-squared on y, and stored bin
 variances. The script fits each energy bin up to 0.5 degrees with a
-double-Gaussian PSF and reports 68% and 95% radii for the fitted source
-component. Use `--method king` for a King-profile fit or `--method cumulative`
-for non-parametric containment of the signed excess. `--max-theta` and
+double-Gaussian PSF and reports one configurable containment radius for the
+fitted source component. The default is 68%; use, for example,
+`--containment 0.95` (or `--containment 95`) for 95%. The MC tree is selected
+from this value by default: 68% uses `t_angular_resolution`, while other
+integer percentages use the corresponding `_NNNp` suffix, such as
+`t_angular_resolution_095p`. Use `--mc-tree` to override that selection. Use
+`--method king` for a King-profile fit or `--method cumulative` for
+non-parametric containment of the signed excess. `--max-theta` and
 `--max-theta2` set the fit range; `--energy-rebin` combines adjacent data
 energy bins only.
 
