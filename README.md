@@ -54,7 +54,6 @@ python ./plot_angular_containment_anasum.py \
     --mc-files ../tmp-data/eff_area_tmva.root ../tmp-data/eff_area_xgb.root \
     --labels TMVA XGB \
     --ylim 0. 0.4 \
-    --energy-bin 10 \
     --max-theta 0.5 \
     --energy-rebin 2 \
     --energy-range -1. 1.5
@@ -75,12 +74,14 @@ non-parametric containment of the signed excess. `--max-theta` and
 `--max-theta2` set the fit range; `--energy-rebin` combines adjacent data
 energy bins only.
 
-For a fit diagnostic, add `--energy-bin INDEX` to show the data distribution
-and fitted PSF for that zero-based (and, if rebinned, rebinned) data bin.
-Uncertainties for fitted data radii are 68% intervals propagated from the fit
-covariance using reproducible parameter toys. The MC curves are fitted from
-their histogram but currently have no uncertainty bands. `--mc-entry` selects
-the IRF-tree entry (normally an azimuth bin). Use `--mc-tree` or
+The main containment plot is written to the `--output` PDF. A separate
+`--distribution-output` PDF contains four angular-distribution panels for the
+nearest available energy bins to log10(Erec/TeV) = −0.5, 0.0, 0.5, and 1.0.
+These panels show the data and raw MC histograms without fits; their
+angular-difference axis ends at 0.25
+degrees. Uncertainties for fitted data radii are 68% intervals propagated from
+the fit covariance using reproducible parameter toys. `--mc-entry` selects the
+IRF-tree entry (normally an azimuth bin). Use `--mc-tree` or
 `--data-histogram` only when the ROOT object paths differ from the defaults.
 
 ## License

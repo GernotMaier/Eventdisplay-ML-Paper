@@ -21,19 +21,20 @@ from scipy.optimize import OptimizeWarning, curve_fit
 DEFAULT_DATA_HISTOGRAM = "total_1/stereo/stereoParameterHistograms/htheta2Erec_diff"
 DEFAULT_MC_TREE = "t_angular_resolution"
 MC_LOGDIFF_HISTOGRAM_INDEX = 2  # E_LOGDIFF, hAngularLogDiff_2D
-DEFAULT_MC_P68_BRANCH = "Rec_angRes_p68"
-DEFAULT_MC_P80_BRANCH = "Rec_angRes_p80"
 DEFAULT_MAX_THETA_DEG = 0.5
-CONTAINMENT_LEVELS = (0.68, 0.95)
+DEFAULT_CONTAINMENT = 0.68
 DEFAULT_BOOTSTRAP_SAMPLES = 5000
 BOOTSTRAP_PERCENTILES = (15.865, 84.135)
+DIAGNOSTIC_ENERGY_CENTERS = (-0.5, 0.0, 0.5, 1.0)
+DIAGNOSTIC_MAX_THETA_DEG = 0.25
+DEFAULT_DISTRIBUTION_OUTPUT = Path("angular_distributions_anasum_comparison.pdf")
 
 
 @dataclass(frozen=True)
 class ContainmentResult:
     energy_centers: np.ndarray
-    radii: dict[float, np.ndarray]
-    uncertainties: dict[float, np.ndarray]
+    radii: np.ndarray
+    uncertainties: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -45,11 +46,38 @@ class DataHistogram:
     theta_squared: bool = True
 
 
+def _parse_containment(value: str) -> float:
+    """Parse a containment fraction, accepting either 0.68 or 68 notation."""
+    try:
+        containment = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("containment must be a number") from error
+    if containment > 1:
+        containment /= 100.0
+    if not 0 < containment < 1:
+        raise argparse.ArgumentTypeError("containment must be between 0 and 1")
+    percentage = 100 * containment
+    if not np.isclose(percentage, round(percentage)):
+        raise argparse.ArgumentTypeError(
+            "containment must correspond to an integer percentage so the MC tree "
+            "name can be selected"
+        )
+    return containment
+
+
+def _mc_tree_for_containment(containment: float) -> str:
+    """Return the standard angular-resolution tree for a containment level."""
+    percentage = int(round(100 * containment))
+    if percentage == 68:
+        return DEFAULT_MC_TREE
+    return f"{DEFAULT_MC_TREE}_{percentage:03d}p"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare 68% and 95% angular containment from one or more anasum files "
-            "with curves derived from the corresponding IRF objects."
+            "Compare one configurable angular-containment radius from one or more "
+            "anasum files with curves derived from the corresponding IRF objects."
         )
     )
     parser.add_argument(
@@ -97,9 +125,21 @@ def parse_args() -> argparse.Namespace:
         help="data containment estimator (default: %(default)s)",
     )
     parser.add_argument(
+        "--containment",
+        type=_parse_containment,
+        default=DEFAULT_CONTAINMENT,
+        metavar="FRACTION",
+        help=(
+            "containment level as a fraction or percentage (default: 0.68; "
+            "for example, --containment 0.95 or --containment 95)"
+        ),
+    )
+    parser.add_argument(
         "--mc-tree",
-        default=DEFAULT_MC_TREE,
-        help=f"IRF tree containing hAngularLogDiff_2D (default: {DEFAULT_MC_TREE})",
+        help=(
+            "override the IRF tree containing hAngularLogDiff_2D "
+            "(default: selected from --containment)"
+        ),
     )
     parser.add_argument(
         "--mc-entry",
@@ -136,12 +176,6 @@ def parse_args() -> argparse.Namespace:
         help="containment x-axis range in log10(Erec/TeV)",
     )
     parser.add_argument(
-        "--energy-bin",
-        type=int,
-        metavar="INDEX",
-        help="show the 1D theta distribution and 2D PSF fit for this zero-based energy-bin index",
-    )
-    parser.add_argument(
         "--energy-rebin",
         type=int,
         default=1,
@@ -154,6 +188,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("angular_containment_anasum_comparison.pdf"),
         help="output plot (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--distribution-output",
+        type=Path,
+        default=DEFAULT_DISTRIBUTION_OUTPUT,
+        help=(
+            "output PDF for the four angular-distribution diagnostics "
+            f"(default: {DEFAULT_DISTRIBUTION_OUTPUT})"
+        ),
     )
     parser.add_argument("--dpi", type=int, default=300)
     args = parser.parse_args()
@@ -174,8 +217,6 @@ def parse_args() -> argparse.Namespace:
         or args.energy_range[0] >= args.energy_range[1]
     ):
         parser.error("--energy-range requires finite EMIN < EMAX")
-    if args.energy_bin is not None and args.energy_bin < 0:
-        parser.error("--energy-bin must be non-negative")
     if args.energy_rebin < 1:
         parser.error("--energy-rebin must be at least 1")
     if len(args.data_files) != len(args.mc_files):
@@ -275,38 +316,9 @@ def read_data(
     return DataHistogram(*values)
 
 
-def _branch_name(
-    available: list[str], requested: str | None, candidates: tuple[str, ...], label: str
-) -> str:
-    if requested is not None:
-        if requested not in available:
-            raise KeyError(
-                f"Branch {requested!r} not found; available branches: {available}"
-            )
-        return requested
-    by_lower = {name.lower(): name for name in available}
-    for candidate in candidates:
-        if candidate.lower() in by_lower:
-            return by_lower[candidate.lower()]
-    raise KeyError(f"Could not find {label} branch; available branches: {available}")
-
-
-def _branch_title(tree: uproot.behaviors.TBranch.TBranch, name: str) -> str:
-    try:
-        return str(tree[name].title)
-    except (AttributeError, KeyError):
-        return ""
-
-
-def read_mc_histogram(
-    root_file: Path,
-    tree_name: str = DEFAULT_MC_TREE,
-    mc_entry: int = 0,
-    max_theta_deg: float | None = DEFAULT_MAX_THETA_DEG,
-    max_theta2: float | None = None,
-    method: str = "double-gaussian",
-) -> ContainmentResult:
-    """Derive MC containment from the reconstructed-energy angular histogram."""
+def _read_mc_histogram_data(
+    root_file: Path, tree_name: str, mc_entry: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     with uproot.open(root_file) as root:
         try:
             tree = root[tree_name]
@@ -333,10 +345,27 @@ def read_mc_histogram(
 
     if variances is None:
         raise ValueError(f"hAngularLogDiff_2D in {root_file} has no stored variances")
-    values = np.asarray(values, dtype=float)
-    variances = np.asarray(variances, dtype=float)
-    energy_edges = np.asarray(energy_edges, dtype=float)
-    log_theta_edges = np.asarray(log_theta_edges, dtype=float)
+    return (
+        np.asarray(values, dtype=float),
+        np.asarray(variances, dtype=float),
+        np.asarray(energy_edges, dtype=float),
+        np.asarray(log_theta_edges, dtype=float),
+    )
+
+
+def read_mc_histogram(
+    root_file: Path,
+    tree_name: str = DEFAULT_MC_TREE,
+    mc_entry: int = 0,
+    max_theta_deg: float | None = DEFAULT_MAX_THETA_DEG,
+    max_theta2: float | None = None,
+    method: str = "double-gaussian",
+    containment: float = DEFAULT_CONTAINMENT,
+) -> ContainmentResult:
+    """Derive one MC containment radius from the angular histogram."""
+    values, variances, energy_edges, log_theta_edges = _read_mc_histogram_data(
+        root_file, tree_name, mc_entry
+    )
     if values.shape != variances.shape:
         raise ValueError(
             f"MC histogram counts and variances have different shapes in {root_file}"
@@ -370,16 +399,13 @@ def read_mc_histogram(
     theta2_edges = 10.0 ** (2.0 * log_theta_edges[: theta_bins + 1])
 
     energy = 0.5 * (energy_edges[:-1] + energy_edges[1:])
-    radii = {level: np.full(energy.shape, np.nan) for level in CONTAINMENT_LEVELS}
-    uncertainties = {
-        level: np.full((2, energy.size), np.nan) for level in CONTAINMENT_LEVELS
-    }
+    radii = np.full(energy.shape, np.nan)
+    uncertainties = np.full((2, energy.size), np.nan)
     for index, (counts, errors) in enumerate(
         zip(values[:, :theta_bins], variances[:, :theta_bins], strict=True)
     ):
         if method == "cumulative":
-            for level in CONTAINMENT_LEVELS:
-                radii[level][index] = _radius(theta2_edges, counts, level, True)
+            radii[index] = _radius(theta2_edges, counts, containment, True)
             continue
         try:
             fit = _fit_psf(theta2_edges, counts, errors, method)
@@ -391,117 +417,7 @@ def read_mc_histogram(
         radius_function = (
             _double_gaussian_radius if method == "double-gaussian" else _king_radius
         )
-        for level in CONTAINMENT_LEVELS:
-            radii[level][index] = float(radius_function(parameters[None, :], level)[0])
-    return ContainmentResult(energy, radii, uncertainties)
-
-
-def read_mc(
-    root_file: Path,
-    tree_name: str = DEFAULT_MC_TREE,
-    energy_branch: str | None = None,
-    energy_is_log10: bool | None = None,
-    mc_entry: int = 0,
-) -> ContainmentResult:
-    """Read one fEffArea IRF row and its p68/p80 angular resolutions.
-
-    fEffArea files produced by Eventdisplay do not have a standalone energy
-    branch.  Their reconstructed-energy centers are stored in the variable-
-    length Rec_e0 branch, with Rec_nbins describing its length.
-    """
-    with uproot.open(root_file) as root:
-        try:
-            tree = root[tree_name]
-        except uproot.KeyInFileError as error:
-            raise KeyError(f"Tree {tree_name!r} not found in {root_file}") from error
-        if mc_entry < 0 or mc_entry >= tree.num_entries:
-            raise IndexError(
-                f"--mc-entry {mc_entry} is outside {tree_name!r} in {root_file} "
-                f"(entries: {tree.num_entries})"
-            )
-        available = [str(name) for name in tree.keys()]
-        by_lower = {name.lower(): name for name in available}
-        energy_candidates = (
-            "Erec",
-            "E_reco",
-            "Energy",
-            "energy",
-            "E",
-            "logE",
-            "log10E",
-        )
-        if energy_branch is not None:
-            energy_name = _branch_name(
-                available, energy_branch, energy_candidates, "energy"
-            )
-        else:
-            energy_name = next(
-                (
-                    by_lower[candidate.lower()]
-                    for candidate in energy_candidates
-                    if candidate.lower() in by_lower
-                ),
-                None,
-            )
-        p68_name = _branch_name(
-            available, DEFAULT_MC_P68_BRANCH, (DEFAULT_MC_P68_BRANCH,), "68% resolution"
-        )
-        p80_name = _branch_name(
-            available, DEFAULT_MC_P80_BRANCH, (DEFAULT_MC_P80_BRANCH,), "80% resolution"
-        )
-        branch_names = [p68_name, p80_name]
-        if energy_name is None:
-            for metadata_name in ("Rec_e0", "Rec_nbins"):
-                if metadata_name not in available:
-                    raise KeyError(
-                        f"fEffArea has no energy branch and no {metadata_name!r} metadata; "
-                        f"available branches: {available}"
-                    )
-            branch_names = ["Rec_e0", "Rec_nbins", *branch_names]
-        else:
-            branch_names = [energy_name, *branch_names]
-        arrays = tree.arrays(
-            branch_names,
-            entry_start=mc_entry,
-            entry_stop=mc_entry + 1,
-            library="np",
-        )
-        if energy_name is None:
-            energy = np.asarray(arrays["Rec_e0"][0], dtype=float)
-            p68 = np.asarray(arrays[p68_name][0], dtype=float)
-            p80 = np.asarray(arrays[p80_name][0], dtype=float)
-            energy_is_log10 = True
-        else:
-            energy = np.asarray(arrays[energy_name][0], dtype=float)
-            p68 = np.asarray(arrays[p68_name][0], dtype=float)
-            p80 = np.asarray(arrays[p80_name][0], dtype=float)
-            title = _branch_title(tree, energy_name)
-
-    if not (energy.shape == p68.shape == p80.shape) or energy.ndim != 1:
-        raise ValueError(
-            f"MC branches in entry {mc_entry} of {root_file} do not contain "
-            "matching 1D arrays"
-        )
-    if energy_is_log10 is None:
-        energy_is_log10 = "log" in f"{energy_name} {title}".lower() or np.any(
-            energy <= 0
-        )
-    if not energy_is_log10:
-        if np.any(energy <= 0):
-            raise ValueError(
-                f"MC energy branch {energy_name!r} contains non-positive values"
-            )
-        energy = np.log10(energy)
-    if not np.all(np.isfinite(energy)):
-        raise ValueError("MC energy values contain non-finite values")
-    for name, values in ((p68_name, p68), (p80_name, p80)):
-        if not np.all(np.isfinite(values)) or np.any(values < 0):
-            raise ValueError(f"MC branch {name!r} contains invalid angular resolutions")
-
-    order = np.argsort(energy)
-    energy = energy[order]
-    radii = {0.68: p68[order], 0.80: p80[order]}
-    uncertainties = {level: np.full((2, energy.size), np.nan) for level in radii}
+        radii[index] = float(radius_function(parameters[None, :], containment)[0])
     return ContainmentResult(energy, radii, uncertainties)
 
 
@@ -553,14 +469,13 @@ def containment_from_data(
     max_theta2: float | None = None,
     method: str = "double-gaussian",
     energy_rebin: int = 1,
+    containment: float = DEFAULT_CONTAINMENT,
 ) -> ContainmentResult:
-    """Calculate containment with a PSF fit or the legacy cumulative method."""
+    """Calculate one containment radius with a PSF fit or cumulative method."""
     data = _rebin_data(read_data(root_file, histogram_name), energy_rebin)
     energy = 0.5 * (data.energy_edges[:-1] + data.energy_edges[1:])
-    radii = {level: np.full(energy.shape, np.nan) for level in CONTAINMENT_LEVELS}
-    uncertainties = {
-        level: np.full((2, energy.size), np.nan) for level in CONTAINMENT_LEVELS
-    }
+    radii = np.full(energy.shape, np.nan)
+    uncertainties = np.full((2, energy.size), np.nan)
 
     if max_theta2 is not None:
         coordinate_limit = max_theta2 if data.theta_squared else np.sqrt(max_theta2)
@@ -587,38 +502,34 @@ def containment_from_data(
             fit = _fit_psf(theta_edges, counts, variances, method)
             if fit is not None:
                 fitted_radii, fitted_uncertainties = _fitted_containment(
-                    *fit, method, bootstrap_samples, rng
+                    *fit, method, bootstrap_samples, rng, containment
                 )
-                for level in CONTAINMENT_LEVELS:
-                    radii[level][index] = fitted_radii[level]
-                    uncertainties[level][:, index] = fitted_uncertainties[level]
+                radii[index] = fitted_radii
+                uncertainties[:, index] = fitted_uncertainties
             continue
-        for level in CONTAINMENT_LEVELS:
-            radii[level][index] = _radius(
-                theta_edges, counts, level, data.theta_squared
+        radii[index] = _radius(theta_edges, counts, containment, data.theta_squared)
+        central = radii[index]
+        if not np.isfinite(central):
+            continue
+        toys = rng.normal(
+            counts, np.sqrt(variances), size=(bootstrap_samples, counts.size)
+        )
+        toy_radii = np.array(
+            [_radius(theta_edges, toy, containment, data.theta_squared) for toy in toys]
+        )
+        toy_radii = toy_radii[np.isfinite(toy_radii)]
+        if toy_radii.size < 100:
+            warnings.warn(
+                f"Too few valid bootstrap toys for {containment:.0%} containment "
+                f"in energy bin {index} of {root_file}",
+                stacklevel=2,
             )
-            central = radii[level][index]
-            if not np.isfinite(central):
-                continue
-            toys = rng.normal(
-                counts, np.sqrt(variances), size=(bootstrap_samples, counts.size)
-            )
-            toy_radii = np.array(
-                [_radius(theta_edges, toy, level, data.theta_squared) for toy in toys]
-            )
-            toy_radii = toy_radii[np.isfinite(toy_radii)]
-            if toy_radii.size < 100:
-                warnings.warn(
-                    f"Too few valid bootstrap toys for {level:.0%} containment "
-                    f"in energy bin {index} of {root_file}",
-                    stacklevel=2,
-                )
-                continue
-            lower, upper = np.percentile(toy_radii, BOOTSTRAP_PERCENTILES)
-            uncertainties[level][:, index] = (
-                max(central - lower, 0.0),
-                max(upper - central, 0.0),
-            )
+            continue
+        lower, upper = np.percentile(toy_radii, BOOTSTRAP_PERCENTILES)
+        uncertainties[:, index] = (
+            max(central - lower, 0.0),
+            max(upper - central, 0.0),
+        )
     return ContainmentResult(energy, radii, uncertainties)
 
 
@@ -638,48 +549,36 @@ def print_containment_tables(
     data: list[ContainmentResult],
     mc: list[ContainmentResult],
     labels: list[str],
+    containment: float,
 ) -> None:
     """Print derived data and MC containment radii as aligned tables."""
+    radius_label = f"R{containment:.0%} [deg]"
     for label, data_result, mc_result in zip(labels, data, mc, strict=True):
         print(f"\nContainment radii: {label} (data)")
-        print(f"{'log10(Erec/TeV)':>16}  {'R68 [deg]':>25}  {'R95 [deg]':>25}")
+        print(f"{'log10(Erec/TeV)':>16}  {radius_label:>25}")
         for index, energy in enumerate(data_result.energy_centers):
             print(
                 f"{energy:16.4f}  "
-                f"{_format_radius(data_result.radii[0.68][index], data_result.uncertainties[0.68][:, index]):>25}  "
-                f"{_format_radius(data_result.radii[0.95][index], data_result.uncertainties[0.95][:, index]):>25}"
+                f"{_format_radius(data_result.radii[index], data_result.uncertainties[:, index]):>25}"
             )
 
         print(f"\nContainment radii: {label} (MC)")
-        print(f"{'log10(Erec/TeV)':>16}  {'R68 [deg]':>12}  {'R95 [deg]':>12}")
+        print(f"{'log10(Erec/TeV)':>16}  {radius_label:>12}")
         for index, energy in enumerate(mc_result.energy_centers):
-            print(
-                f"{energy:16.4f}  "
-                f"{_format_radius(mc_result.radii[0.68][index]):>12}  "
-                f"{_format_radius(mc_result.radii[0.95][index]):>12}"
-            )
+            print(f"{energy:16.4f}  {_format_radius(mc_result.radii[index]):>12}")
 
 
 def distribution_from_data(
     root_file: Path,
     histogram_name: str,
-    energy_bin: int,
-    method: str,
+    energy_center: float,
     max_theta_deg: float | None = DEFAULT_MAX_THETA_DEG,
     max_theta2: float | None = None,
     energy_rebin: int = 1,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, str]:
+) -> tuple[np.ndarray, np.ndarray, float]:
     data = _rebin_data(read_data(root_file, histogram_name), energy_rebin)
-    if energy_bin >= data.counts.shape[0]:
-        raise ValueError(
-            f"--energy-bin {energy_bin} is outside {root_file} (bins: {data.counts.shape[0]})"
-        )
-    if method == "cumulative":
-        raise ValueError(
-            "--energy-bin requires a fitted method (double-gaussian or king)"
-        )
-    if not data.theta_squared:
-        raise ValueError("PSF fitting requires a theta-squared histogram")
+    energy_centers = 0.5 * (data.energy_edges[:-1] + data.energy_edges[1:])
+    energy_bin = int(np.argmin(np.abs(energy_centers - energy_center)))
     if max_theta2 is not None:
         coordinate_limit = max_theta2 if data.theta_squared else np.sqrt(max_theta2)
     elif max_theta_deg is None:
@@ -690,48 +589,59 @@ def distribution_from_data(
         np.searchsorted(data.theta_edges, coordinate_limit, side="right") - 1
     )
     if theta_bins < 1:
-        raise ValueError(f"the angular fit limit leaves no theta bins in {root_file}")
+        raise ValueError(
+            f"the angular display limit leaves no theta bins in {root_file}"
+        )
     theta_edges_data = data.theta_edges[: theta_bins + 1]
     counts = data.counts[energy_bin, :theta_bins]
-    variances = data.variances[energy_bin, :theta_bins]
-    fit = _fit_psf(theta_edges_data, counts, variances, method)
-    if fit is None:
-        raise ValueError(
-            f"2D PSF fit failed for energy bin {energy_bin} in {root_file}"
-        )
-    parameters, _ = fit
     theta_edges = np.sqrt(theta_edges_data) if data.theta_squared else theta_edges_data
     widths = np.diff(theta_edges)
     total = float(np.sum(counts))
     if not np.isfinite(total) or total <= 0:
         raise ValueError(
-            f"energy bin {energy_bin} in {root_file} has no positive total"
+            f"energy bin near {energy_center} in {root_file} has no positive total"
         )
     observed = counts / total / widths
-    bounds = (theta_edges_data[:-1], theta_edges_data[1:])
-    model_counts = (
-        _double_gaussian_bin_counts(bounds, *parameters)
-        if method == "double-gaussian"
-        else _king_bin_counts(bounds, *parameters)
-    )
-    model_total = float(np.sum(model_counts))
-    if not np.isfinite(model_total) or model_total <= 0:
-        raise ValueError(
-            f"2D PSF fit has no positive model total in energy bin {energy_bin} of {root_file}"
-        )
-    fitted = model_counts / model_total / widths
-    center = 0.5 * (data.energy_edges[energy_bin] + data.energy_edges[energy_bin + 1])
+    center = energy_centers[energy_bin]
     display_limit = (
         np.sqrt(coordinate_limit) if data.theta_squared else coordinate_limit
     )
     theta_edges = theta_edges.copy()
     theta_edges[-1] = min(theta_edges[-1], display_limit)
-    return (
-        theta_edges,
-        observed,
-        fitted,
-        rf"$\log_{{10}}(E_{{\mathrm{{rec}}}}/\mathrm{{TeV}}) = {center:.3f}$",
+    return theta_edges, observed, center
+
+
+def distribution_from_mc(
+    root_file: Path,
+    tree_name: str,
+    mc_entry: int,
+    energy_center: float,
+    max_theta_deg: float = DIAGNOSTIC_MAX_THETA_DEG,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Read and normalize one raw MC angular histogram at the nearest energy."""
+    values, _, energy_edges, log_theta_edges = _read_mc_histogram_data(
+        root_file, tree_name, mc_entry
     )
+    if not np.all(np.isfinite(values)) or np.any(values < 0):
+        raise ValueError(f"hAngularLogDiff_2D in {root_file} contains invalid counts")
+    energy_centers = 0.5 * (energy_edges[:-1] + energy_edges[1:])
+    energy_bin = int(np.argmin(np.abs(energy_centers - energy_center)))
+    theta_bins = int(
+        np.searchsorted(log_theta_edges, np.log10(max_theta_deg), side="right") - 1
+    )
+    if theta_bins < 1:
+        raise ValueError(
+            f"the angular display limit leaves no MC theta bins in {root_file}"
+        )
+    theta_edges = 10.0 ** log_theta_edges[: theta_bins + 1]
+    counts = values[energy_bin, :theta_bins]
+    widths = np.diff(theta_edges)
+    total = float(np.sum(counts))
+    if not np.isfinite(total) or total <= 0:
+        raise ValueError(
+            f"MC energy bin near {energy_center} in {root_file} has no positive total"
+        )
+    return theta_edges, counts / total / widths, energy_centers[energy_bin]
 
 
 def make_plot(
@@ -740,8 +650,7 @@ def make_plot(
     labels: list[str],
     ylim: tuple[float, float] | None,
     energy_range: tuple[float, float] | None = None,
-    distributions: list[tuple[np.ndarray, np.ndarray, np.ndarray, str]] | None = None,
-    method: str = "double-gaussian",
+    containment: float = DEFAULT_CONTAINMENT,
 ) -> plt.Figure:
     plt.rcParams.update(
         {
@@ -755,16 +664,7 @@ def make_plot(
             "ps.fonttype": 42,
         }
     )
-    if distributions is None:
-        figure, axis = plt.subplots(figsize=(7.5, 4.5), constrained_layout=True)
-        distribution_axis = None
-    else:
-        figure, (axis, distribution_axis) = plt.subplots(
-            ncols=2,
-            figsize=(10.5, 4.5),
-            gridspec_kw={"width_ratios": (1.6, 1.0)},
-            constrained_layout=True,
-        )
+    figure, axis = plt.subplots(figsize=(7.5, 4.5), constrained_layout=True)
     base_colors = ("#0072B2", "#D55E00")
     colors = tuple(
         base_colors[index]
@@ -772,38 +672,34 @@ def make_plot(
         else plt.get_cmap("tab10")(index % 10)
         for index in range(len(labels))
     )
-    data_styles = {0.68: ("o", "-"), 0.95: ("s", "--")}
-    mc_styles = {0.68: (":",), 0.95: ("-.",)}
+    data_marker, data_line = "o", "-"
+    mc_line = ":"
     for result, label, color in zip(data, labels, colors, strict=True):
-        for level in CONTAINMENT_LEVELS:
-            marker, line = data_styles[level]
-            valid = np.isfinite(result.radii[level])
-            axis.errorbar(
-                result.energy_centers[valid],
-                result.radii[level][valid],
-                yerr=result.uncertainties[level][:, valid],
-                color=color,
-                marker=marker,
-                linestyle=line,
-                linewidth=1.6,
-                markersize=5,
-                markerfacecolor="white",
-                capsize=1.5,
-                elinewidth=0.6,
-                label=f"{label} (data, {level:.0%})",
-            )
+        valid = np.isfinite(result.radii)
+        axis.errorbar(
+            result.energy_centers[valid],
+            result.radii[valid],
+            yerr=result.uncertainties[:, valid],
+            color=color,
+            marker=data_marker,
+            linestyle=data_line,
+            linewidth=1.6,
+            markersize=5,
+            markerfacecolor="white",
+            capsize=1.5,
+            elinewidth=0.6,
+            label=f"{label} (data, {containment:.0%})",
+        )
     for result, label, color in zip(mc, labels, colors, strict=True):
-        for level in CONTAINMENT_LEVELS:
-            (line,) = mc_styles[level]
-            valid = np.isfinite(result.radii[level])
-            axis.plot(
-                result.energy_centers[valid],
-                result.radii[level][valid],
-                color=color,
-                linestyle=line,
-                linewidth=1.5,
-                label=f"{label} (MC, {level:.0%})",
-            )
+        valid = np.isfinite(result.radii)
+        axis.plot(
+            result.energy_centers[valid],
+            result.radii[valid],
+            color=color,
+            linestyle=mc_line,
+            linewidth=1.5,
+            label=f"{label} (MC, {containment:.0%})",
+        )
     all_energy = np.concatenate(
         [result.energy_centers for result in (*data, *mc) if result.energy_centers.size]
     )
@@ -821,30 +717,80 @@ def make_plot(
     axis.set_ylabel("Angular containment radius [deg]")
     axis.grid(color="0.88", linewidth=0.6)
     axis.legend(frameon=False, ncol=2, fontsize=8)
-    if distribution_axis is not None:
-        for (theta_edges, observed, fitted, title), label, color in zip(
-            distributions, labels, colors, strict=True
+    return figure
+
+
+def make_distribution_plot(
+    distributions: list[
+        list[
+            tuple[
+                tuple[np.ndarray, np.ndarray, float],
+                tuple[np.ndarray, np.ndarray, float],
+            ]
+        ]
+    ],
+    energy_centers: tuple[float, ...],
+    labels: list[str],
+    max_theta_deg: float = DIAGNOSTIC_MAX_THETA_DEG,
+) -> plt.Figure:
+    """Plot data and raw MC histograms in four energy panels."""
+    figure, axes = plt.subplots(
+        nrows=2,
+        ncols=2,
+        figsize=(10.5, 7.5),
+        sharex=True,
+        sharey=True,
+        constrained_layout=False,
+    )
+    axes = axes.ravel()
+    base_colors = ("#0072B2", "#D55E00")
+    colors = tuple(
+        base_colors[index]
+        if index < len(base_colors)
+        else plt.get_cmap("tab10")(index % 10)
+        for index in range(len(labels))
+    )
+    for axis, target, panel in zip(axes, energy_centers, distributions, strict=True):
+        for (data_distribution, mc_distribution), label, color in zip(
+            panel, labels, colors, strict=True
         ):
-            distribution_axis.stairs(
+            data_edges, observed, _ = data_distribution
+            mc_edges, simulation, _ = mc_distribution
+            axis.stairs(
                 observed,
-                theta_edges,
+                data_edges,
                 color=color,
-                linewidth=1.2,
+                linewidth=1.1,
+                alpha=0.8,
                 label=f"{label} (data)",
             )
-            distribution_axis.stairs(
-                fitted,
-                theta_edges,
+            axis.stairs(
+                simulation,
+                mc_edges,
                 color=color,
-                linewidth=1.7,
-                label=f"{label} ({method} fit)",
+                linestyle="--",
+                linewidth=1.3,
+                label=f"{label} (MC histogram)",
             )
-            distribution_axis.set_xlim(0, theta_edges[-1])
-            distribution_axis.set_xlabel(r"Angular separation $\theta$ [deg]")
-            distribution_axis.set_ylabel("Normalized density [deg$^{-1}$]")
-            distribution_axis.set_title(title)
-            distribution_axis.grid(color="0.88", linewidth=0.6)
-            distribution_axis.legend(frameon=False, fontsize=7)
+        axis.set_xlim(0, max_theta_deg)
+        axis.set_title(
+            rf"$\log_{{10}}(E_{{\mathrm{{rec}}}}/\mathrm{{TeV}})\approx {target:.1f}$"
+        )
+        axis.grid(color="0.88", linewidth=0.6)
+    axes[2].set_xlabel(r"Angular separation $\theta$ [deg]")
+    axes[3].set_xlabel(r"Angular separation $\theta$ [deg]")
+    axes[0].set_ylabel("Normalized density [deg$^{-1}$]")
+    axes[2].set_ylabel("Normalized density [deg$^{-1}$]")
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        legend_labels,
+        loc="lower center",
+        ncol=min(3, len(legend_labels)),
+        frameon=False,
+        fontsize=8,
+    )
+    figure.tight_layout(rect=(0, 0.08, 1, 1))
     return figure
 
 
@@ -865,48 +811,77 @@ def main() -> None:
             args.max_theta2,
             args.method,
             args.energy_rebin,
+            args.containment,
         )
         for index, path in enumerate(args.data_files)
     ]
+    mc_tree = args.mc_tree or _mc_tree_for_containment(args.containment)
     mc = [
         read_mc_histogram(
             path,
-            args.mc_tree,
-            args.mc_entry,
-            args.max_theta,
-            args.max_theta2,
-            args.method,
+            tree_name=mc_tree,
+            mc_entry=args.mc_entry,
+            max_theta_deg=args.max_theta,
+            max_theta2=args.max_theta2,
+            method=args.method,
+            containment=args.containment,
         )
         for path in args.mc_files
     ]
-    print_containment_tables(data, mc, labels)
-    distributions = None
-    if args.energy_bin is not None:
-        distributions = [
-            distribution_from_data(
-                path,
-                args.data_histogram,
-                args.energy_bin,
-                args.method,
-                args.max_theta,
-                args.max_theta2,
-                args.energy_rebin,
+    print_containment_tables(data, mc, labels, args.containment)
+    if args.max_theta is not None:
+        diagnostic_max_theta = min(args.max_theta, DIAGNOSTIC_MAX_THETA_DEG)
+    elif args.max_theta2 is not None:
+        diagnostic_max_theta = min(np.sqrt(args.max_theta2), DIAGNOSTIC_MAX_THETA_DEG)
+    else:
+        diagnostic_max_theta = DIAGNOSTIC_MAX_THETA_DEG
+    distributions = [
+        [
+            (
+                distribution_from_data(
+                    data_path,
+                    args.data_histogram,
+                    target_energy,
+                    diagnostic_max_theta,
+                    None,
+                    args.energy_rebin,
+                ),
+                distribution_from_mc(
+                    mc_path,
+                    mc_tree,
+                    args.mc_entry,
+                    target_energy,
+                    DIAGNOSTIC_MAX_THETA_DEG,
+                ),
             )
-            for path in args.data_files
+            for data_path, mc_path in zip(args.data_files, args.mc_files, strict=True)
         ]
+        for target_energy in DIAGNOSTIC_ENERGY_CENTERS
+    ]
     figure = make_plot(
         data,
         mc,
         labels,
         tuple(args.ylim) if args.ylim else None,
         tuple(args.energy_range) if args.energy_range else None,
-        distributions,
-        args.method,
+        args.containment,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(args.output, dpi=args.dpi, bbox_inches="tight")
     plt.close(figure)
     print(f"Wrote {args.output}")
+    distribution_figure = make_distribution_plot(
+        distributions,
+        DIAGNOSTIC_ENERGY_CENTERS,
+        labels,
+        DIAGNOSTIC_MAX_THETA_DEG,
+    )
+    args.distribution_output.parent.mkdir(parents=True, exist_ok=True)
+    distribution_figure.savefig(
+        args.distribution_output, dpi=args.dpi, bbox_inches="tight"
+    )
+    plt.close(distribution_figure)
+    print(f"Wrote {args.distribution_output}")
 
 
 def _double_gaussian_bin_counts(
@@ -1011,36 +986,35 @@ def _fitted_containment(
     method: str,
     samples: int,
     rng: np.random.Generator,
+    containment: float,
 ):
     radius_function = (
         _double_gaussian_radius if method == "double-gaussian" else _king_radius
     )
-    radii, uncertainties = {}, {}
     central_parameters = parameters[None, :]
-    for level in CONTAINMENT_LEVELS:
-        radii[level] = float(radius_function(central_parameters, level)[0])
-        uncertainties[level] = np.array([np.nan, np.nan])
-        if covariance is None:
-            continue
-        toys = rng.multivariate_normal(parameters, covariance, size=samples)
-        if method == "double-gaussian":
-            valid = (
-                (toys[:, 0] >= 0)
-                & (toys[:, 1] >= 0)
-                & (toys[:, 1] <= 1)
-                & (toys[:, 2] > 0)
-                & (toys[:, 3] >= 0)
-            )
-        else:
-            valid = (toys[:, 0] >= 0) & (toys[:, 1] > 0) & (toys[:, 2] > 1)
-        toy_radii = radius_function(toys[valid], level)
-        if toy_radii.size >= 100:
-            lower, upper = np.percentile(toy_radii, BOOTSTRAP_PERCENTILES)
-            uncertainties[level] = (
-                max(radii[level] - lower, 0),
-                max(upper - radii[level], 0),
-            )
-    return radii, uncertainties
+    radius = float(radius_function(central_parameters, containment)[0])
+    uncertainty = np.array([np.nan, np.nan])
+    if covariance is None:
+        return radius, uncertainty
+    toys = rng.multivariate_normal(parameters, covariance, size=samples)
+    if method == "double-gaussian":
+        valid = (
+            (toys[:, 0] >= 0)
+            & (toys[:, 1] >= 0)
+            & (toys[:, 1] <= 1)
+            & (toys[:, 2] > 0)
+            & (toys[:, 3] >= 0)
+        )
+    else:
+        valid = (toys[:, 0] >= 0) & (toys[:, 1] > 0) & (toys[:, 2] > 1)
+    toy_radii = radius_function(toys[valid], containment)
+    if toy_radii.size >= 100:
+        lower, upper = np.percentile(toy_radii, BOOTSTRAP_PERCENTILES)
+        uncertainty = (
+            max(radius - lower, 0),
+            max(upper - radius, 0),
+        )
+    return radius, uncertainty
 
 
 if __name__ == "__main__":
