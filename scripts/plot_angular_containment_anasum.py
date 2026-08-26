@@ -183,6 +183,15 @@ def parse_args() -> argparse.Namespace:
         help="combine this many adjacent data energy bins (default: 1; MC is unchanged)",
     )
     parser.add_argument(
+        "--theta2-cut",
+        type=float,
+        metavar="DEG2",
+        help=(
+            "print signed ON/OFF excess inside this fixed theta-squared cut "
+            "in addition to the containment curves"
+        ),
+    )
+    parser.add_argument(
         "-o",
         "--output",
         type=Path,
@@ -219,6 +228,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("--energy-range requires finite EMIN < EMAX")
     if args.energy_rebin < 1:
         parser.error("--energy-rebin must be at least 1")
+    if args.theta2_cut is not None and (
+        not np.isfinite(args.theta2_cut) or args.theta2_cut <= 0
+    ):
+        parser.error("--theta2-cut must be positive")
     if len(args.data_files) != len(args.mc_files):
         parser.error(
             "the number of data files and MC files must be the same "
@@ -533,6 +546,102 @@ def containment_from_data(
     return ContainmentResult(energy, radii, uncertainties)
 
 
+def excess_inside_theta2_cut(
+    root_file: Path,
+    theta2_cut: float,
+    histogram_name: str = DEFAULT_DATA_HISTOGRAM,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return per-energy signed excess and variance below a fixed theta-squared cut.
+
+    The cut must coincide with a histogram bin edge. This avoids making an
+    unsupported assumption about the angular distribution within a bin.
+    """
+    data = read_data(root_file, histogram_name)
+    if not data.theta_squared:
+        raise ValueError(f"{histogram_name!r} does not have a theta-squared axis")
+    cut_index = int(np.searchsorted(data.theta_edges, theta2_cut, side="right") - 1)
+    if cut_index < 1 or not np.isclose(data.theta_edges[cut_index], theta2_cut):
+        raise ValueError(
+            f"theta2 cut {theta2_cut:g} is not a theta-axis bin edge in {root_file}; "
+            "refusing to split a bin"
+        )
+    counts = np.sum(data.counts[:, :cut_index], axis=1)
+    variances = np.sum(data.variances[:, :cut_index], axis=1)
+    energy = 0.5 * (data.energy_edges[:-1] + data.energy_edges[1:])
+    return energy, counts, variances
+
+
+def print_theta2_cut_excess(
+    paths: list[Path], labels: list[str], histogram_name: str, theta2_cut: float
+) -> None:
+    """Print integrated and reconstructed-energy-resolved excess at a fixed cut."""
+    print(f"\nSigned excess inside theta2 < {theta2_cut:g} deg2")
+    totals: list[tuple[float, float]] = []
+    for path, label in zip(paths, labels, strict=True):
+        energy, counts, variances = excess_inside_theta2_cut(
+            path, theta2_cut, histogram_name
+        )
+        total = float(np.sum(counts))
+        uncertainty = float(np.sqrt(np.sum(variances)))
+        totals.append((total, uncertainty))
+        print(f"{label}: {total:.3f} +/- {uncertainty:.3f}")
+        print(f"{'log10(Erec/TeV)':>16}  {'excess':>12}  {'uncertainty':>12}")
+        for value, count, variance in zip(energy, counts, variances, strict=True):
+            print(f"{value:16.4f}  {count:12.3f}  {np.sqrt(variance):12.3f}")
+    if len(totals) == 2 and totals[0][0] > 0:
+        ratio = totals[1][0] / totals[0][0]
+        ratio_uncertainty = ratio * np.hypot(
+            totals[1][1] / totals[1][0], totals[0][1] / totals[0][0]
+        )
+        print(f"{labels[1]}/{labels[0]}: {ratio:.6f} +/- {ratio_uncertainty:.6f}")
+
+
+def mc_weight_inside_theta2_cut(
+    root_file: Path, tree_name: str, mc_entry: int, theta2_cut: float
+) -> tuple[float, float]:
+    """Bracket weighted MC events inside a theta-squared cut.
+
+    The angular MC histogram is binned in log10(theta).  The returned lower
+    and upper values exclude or include, respectively, the bin crossed by the
+    requested cut; no within-bin shape is assumed.
+    """
+    values, _, _, log_theta_edges = _read_mc_histogram_data(
+        root_file, tree_name, mc_entry
+    )
+    log_theta_cut = np.log10(np.sqrt(theta2_cut))
+    cut_index = int(np.searchsorted(log_theta_edges, log_theta_cut, side="right") - 1)
+    if cut_index < 1 or cut_index >= values.shape[1]:
+        raise ValueError(f"theta2 cut {theta2_cut:g} is outside {root_file}")
+    below_cut_bin = float(np.sum(values[:, :cut_index]))
+    including_cut_bin = float(np.sum(values[:, : cut_index + 1]))
+    return below_cut_bin, including_cut_bin
+
+
+def print_mc_theta2_cut_weights(
+    paths: list[Path],
+    labels: list[str],
+    tree_name: str,
+    mc_entry: int,
+    theta2_cut: float,
+) -> None:
+    """Print MC cut integrals and their binning bracket."""
+    print(f"\nMC weighted events inside theta2 < {theta2_cut:g} deg2")
+    totals: list[tuple[float, float]] = []
+    for path, label in zip(paths, labels, strict=True):
+        lower, upper = mc_weight_inside_theta2_cut(
+            path, tree_name, mc_entry, theta2_cut
+        )
+        totals.append((lower, upper))
+        print(f"{label}: {lower:.3f} to {upper:.3f} (theta binning bracket)")
+    if len(totals) == 2 and totals[0][0] > 0 and totals[0][1] > 0:
+        lower_ratio = totals[1][0] / totals[0][0]
+        upper_ratio = totals[1][1] / totals[0][1]
+        print(
+            f"{labels[1]}/{labels[0]}: {min(lower_ratio, upper_ratio):.6f} "
+            f"to {max(lower_ratio, upper_ratio):.6f} (theta binning bracket)"
+        )
+
+
 def default_label(path: Path) -> str:
     return path.parent.name if path.parent.name else path.stem
 
@@ -770,7 +879,7 @@ def make_distribution_plot(
                 color=color,
                 linestyle="--",
                 linewidth=1.3,
-                label=f"{label} (MC histogram)",
+                label=f"{label} (MC)",
             )
         axis.set_xlim(0, max_theta_deg)
         axis.set_title(
@@ -829,6 +938,13 @@ def main() -> None:
         for path in args.mc_files
     ]
     print_containment_tables(data, mc, labels, args.containment)
+    if args.theta2_cut is not None:
+        print_theta2_cut_excess(
+            args.data_files, labels, args.data_histogram, args.theta2_cut
+        )
+        print_mc_theta2_cut_weights(
+            args.mc_files, labels, mc_tree, args.mc_entry, args.theta2_cut
+        )
     if args.max_theta is not None:
         diagnostic_max_theta = min(args.max_theta, DIAGNOSTIC_MAX_THETA_DEG)
     elif args.max_theta2 is not None:
