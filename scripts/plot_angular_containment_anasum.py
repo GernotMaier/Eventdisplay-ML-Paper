@@ -25,8 +25,14 @@ DEFAULT_MAX_THETA_DEG = 0.5
 DEFAULT_CONTAINMENT = 0.68
 DEFAULT_BOOTSTRAP_SAMPLES = 5000
 BOOTSTRAP_PERCENTILES = (15.865, 84.135)
+CONTAINMENT_YMAX_PERCENTILE = 85.0
+CONTAINMENT_YMAX_PADDING = 1.20
+CONTAINMENT_YMAX_MIN_DEG = 0.30
 DIAGNOSTIC_ENERGY_CENTERS = (-0.5, 0.0, 0.5, 1.0)
 DIAGNOSTIC_MAX_THETA_DEG = 0.25
+DIAGNOSTIC_PEAK_THETA_DEG = 0.08
+DIAGNOSTIC_YLOW_PEAK_FRACTION = 0.25
+DIAGNOSTIC_YHIGH_PEAK_FRACTION = 1.20
 DEFAULT_DISTRIBUTION_OUTPUT = Path("angular_distributions_anasum_comparison.pdf")
 
 
@@ -207,6 +213,16 @@ def parse_args() -> argparse.Namespace:
             f"(default: {DEFAULT_DISTRIBUTION_OUTPUT})"
         ),
     )
+    parser.add_argument(
+        "--distribution-ylim",
+        nargs=2,
+        type=float,
+        metavar=("YMIN", "YMAX"),
+        help=(
+            "angular-distribution y-axis range in deg^-1; by default it is "
+            "derived from the central peak below 0.08 deg"
+        ),
+    )
     parser.add_argument("--dpi", type=int, default=300)
     args = parser.parse_args()
     if args.max_theta is not None and (
@@ -232,6 +248,11 @@ def parse_args() -> argparse.Namespace:
         not np.isfinite(args.theta2_cut) or args.theta2_cut <= 0
     ):
         parser.error("--theta2-cut must be positive")
+    if args.distribution_ylim is not None and (
+        not np.all(np.isfinite(args.distribution_ylim))
+        or args.distribution_ylim[0] >= args.distribution_ylim[1]
+    ):
+        parser.error("--distribution-ylim requires finite YMIN < YMAX")
     if len(args.data_files) != len(args.mc_files):
         parser.error(
             "the number of data files and MC files must be the same "
@@ -821,12 +842,34 @@ def make_plot(
             else (energy_min - margin, energy_max + margin)
         )
     )
-    axis.set_ylim(*(ylim if ylim is not None else (0, None)))
+    if ylim is None:
+        ylim = _containment_ylim(data, mc)
+    axis.set_ylim(*ylim)
     axis.set_xlabel(r"$\log_{10}(E_{\mathrm{rec}}/\mathrm{TeV})$")
     axis.set_ylabel("Angular containment radius [deg]")
     axis.grid(color="0.88", linewidth=0.6)
     axis.legend(frameon=False, ncol=2, fontsize=8)
     return figure
+
+
+def _containment_ylim(
+    data: list[ContainmentResult], mc: list[ContainmentResult]
+) -> tuple[float, float]:
+    """Choose a stable containment range without following bad-bin outliers."""
+    radius_arrays = [result.radii for result in (*data, *mc) if result.radii.size]
+    if not radius_arrays:
+        return (0.0, CONTAINMENT_YMAX_MIN_DEG)
+    radii = np.concatenate(radius_arrays)
+    radii = radii[np.isfinite(radii) & (radii > 0)]
+    if radii.size == 0:
+        return (0.0, CONTAINMENT_YMAX_MIN_DEG)
+    reference = float(np.percentile(radii, CONTAINMENT_YMAX_PERCENTILE))
+    padded = CONTAINMENT_YMAX_PADDING * reference
+    ymax = max(
+        CONTAINMENT_YMAX_MIN_DEG,
+        0.1 * np.ceil(padded / 0.1),
+    )
+    return (0.0, float(ymax))
 
 
 def make_distribution_plot(
@@ -841,8 +884,14 @@ def make_distribution_plot(
     energy_centers: tuple[float, ...],
     labels: list[str],
     max_theta_deg: float = DIAGNOSTIC_MAX_THETA_DEG,
+    ylim: tuple[float, float] | None = None,
 ) -> plt.Figure:
-    """Plot data and raw MC histograms in four energy panels."""
+    """Plot data and raw MC histograms in four energy panels.
+
+    The default shared y-axis is based on the central peak rather than the
+    signed, statistically noisy tail.  An explicit ``ylim`` remains available
+    for publication-specific formatting.
+    """
     figure, axes = plt.subplots(
         nrows=2,
         ncols=2,
@@ -886,6 +935,10 @@ def make_distribution_plot(
             rf"$\log_{{10}}(E_{{\mathrm{{rec}}}}/\mathrm{{TeV}})\approx {target:.1f}$"
         )
         axis.grid(color="0.88", linewidth=0.6)
+    if ylim is None:
+        ylim = _distribution_peak_ylim(distributions)
+    for axis in axes:
+        axis.set_ylim(*ylim)
     axes[2].set_xlabel(r"Angular separation $\theta$ [deg]")
     axes[3].set_xlabel(r"Angular separation $\theta$ [deg]")
     axes[0].set_ylabel("Normalized density [deg$^{-1}$]")
@@ -901,6 +954,45 @@ def make_distribution_plot(
     )
     figure.tight_layout(rect=(0, 0.08, 1, 1))
     return figure
+
+
+def _distribution_peak_ylim(
+    distributions: list[
+        list[
+            tuple[
+                tuple[np.ndarray, np.ndarray, float],
+                tuple[np.ndarray, np.ndarray, float],
+            ]
+        ]
+    ],
+    peak_theta_deg: float = DIAGNOSTIC_PEAK_THETA_DEG,
+) -> tuple[float, float]:
+    """Choose shared limits from the central peak, ignoring noisy tails.
+
+    The 90th percentile in the central window is used instead of the absolute
+    maximum so that one fluctuating data bin cannot determine the plot scale.
+    The lower limit is deliberately tied to the same peak scale because the
+    signed excess can fluctuate below zero outside the source peak.
+    """
+    peak_estimates: list[float] = []
+    for panel in distributions:
+        for data_distribution, mc_distribution in panel:
+            for edges, values, _ in (data_distribution, mc_distribution):
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                central = values[
+                    (centers >= 0) & (centers <= peak_theta_deg) & np.isfinite(values)
+                ]
+                if central.size:
+                    estimate = float(np.nanpercentile(central, 90))
+                    if np.isfinite(estimate) and estimate > 0:
+                        peak_estimates.append(estimate)
+    if not peak_estimates:
+        return (0.0, 1.0)
+    peak = max(peak_estimates)
+    return (
+        -DIAGNOSTIC_YLOW_PEAK_FRACTION * peak,
+        DIAGNOSTIC_YHIGH_PEAK_FRACTION * peak,
+    )
 
 
 def main() -> None:
@@ -991,6 +1083,7 @@ def main() -> None:
         DIAGNOSTIC_ENERGY_CENTERS,
         labels,
         DIAGNOSTIC_MAX_THETA_DEG,
+        tuple(args.distribution_ylim) if args.distribution_ylim else None,
     )
     args.distribution_output.parent.mkdir(parents=True, exist_ok=True)
     distribution_figure.savefig(
