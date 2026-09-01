@@ -86,8 +86,11 @@ We present a machine-learning approach to event reconstruction
 for imaging atmospheric Cherenkov telescopes (IACTs) such as VERITAS and
 CTAO.
 A single XGBoost model acts as a thin layer on top of established methods and
-corrects simultaneously energy and direction using multi-target residual regression.
-Features are image and stereo parameters based mostly on classical methods like
+corrects simultaneously reconstruction energy and direction results using
+multi-target residual regression.
+Features are beside the estimated energies and directions from several
+reconstruction methods also image and stereo parameters
+based mostly on classical methods like
 the Hillas parameters or mean-reduced scaled parameters calculated from MC-trained
 lookup tables.
 The method is validated on VERITAS data and on simulations of the Cherenkov Telescope
@@ -97,11 +100,12 @@ resolution compared to the baseline reconstruction methods.
 
 \section{Introduction}
 
-Imaging Atmospheric Cherenkov Telescopes (IACTs) enable Gamma-ray astronomy
-to measure the energy and direction of photons from
- tens of GeV to hundreds of TeV (e.g., \citep{2009ARA&A..47..523H}).
+Imaging Atmospheric Cherenkov Telescopes (IACTs) are designed to detect
+photons with energies from tens of GeV to hundreds of TeV (e.g., \citep{2009ARA&A..47..523H}).
+and to measure their energy and direction.
 The telescopes record Cherenkov light from air showers with
-large reflectors, pixelated cameras, fast electronics, and trigger systems.
+large reflectors, pixelated cameras, fast electronics, and trigger systems
+optimized to suppress the background light from the night sky.
 Modern observatories measure projections of the longitudinal development of air showers
 with multiple telescopes simultaneously,
 enabling stereoscopic reconstruction of primary direction and energy.
@@ -113,15 +117,20 @@ Systematic uncertainties from varying observation conditions (e.g., night-sky ba
 atmospheric conditions) further limit the achievable performance and require robust
 reconstruction methods.
 
-The different groups operating IACTs have developed a variety of reconstruction methods for direction and energy estimation,
-including robust and efficient geometric methods based on image parameters
-\citep{1985ICRC....3..445H, 1997APh.....8....1D, 1999APh....12..135H},
-template-model based methods \citep{2001A&A...374..895P,2006APh....25..195L, 2009APh....32..231D,2014APh....56...26P},
+The IACT community has developed a variety of reconstruction methods for direction and energy estimation.
+This includes robust and efficient geometric methods based on image parameters
+\citep{1985ICRC....3..445H, 1991ApJ...377L..97A, 1997APh.....8....1D, 1998APh.....8..179C, 1999APh....12..135H},
+template-model based methods
+\citep{2001A&A...374..895P,2006APh....25..195L, 2009APh....32..231D,2014APh....56...26P, 2024APh...16303008S},
 and machine-learning-based methods using
-Hillas parameters \citep{2024A&A...691A.328A} or full camera images.
+Hillas parameters \citep{2024A&A...691A.328A} or full camera images
+\citep{2019ICRC...36..752N}.
 Performance varies across methods, with template-model based algorithms achieving
 the highest precision at the cost of computational complexity and robustness.
-\todo{Missing citations for FreePact / full image methods.}
+An additional step to improve performance is to select events
+based on their estimated reconstruction uncertainty
+\citep{2023arXiv230911375B, 2026arXiv260601059Z}, allowing to trade off event
+statistics and reconstruction accuracy.
 
 This paper shows that a lightweight machine-learning regression layer
 using the XGBoost library \citep{Chen:2016:XST:2939672.2939785}
@@ -129,14 +138,14 @@ can improve the performance of existing image-parameter-based
 reconstruction methods.
 The method implements \textit{residual regression}: rather than predicting direction
 and energy directly, a single multi-target XGBoost model learns the corrections
-(residuals) to an existing baseline reconstruction, effectively combining the robustness
-of the baseline method with the flexibility of gradient-boosted trees.
+(residuals) to existing baseline reconstruction methods.
 The explicit goal is to apply these models to archival data spanning almost two
 decades of VERITAS \citep{2006APh....25..391H} observations
 without requiring a complete re-write of the analysis code or low-level reprocessing
 of raw data.
 The method is sufficiently general to be easily adapted to different IACT arrays,
-as demonstrated for both VERITAS and simulations of the Northern array of the Cherenkov Telescope Array Observatory (CTAO)
+as demonstrated for both VERITAS and simulations of the
+Northern and Southern arrays of the Cherenkov Telescope Array Observatory (CTAO)
 \citep{2019scta.book.....C}.
 
 The code developed for this paper is available from \citep{maier_2026_18412988}.
@@ -155,6 +164,47 @@ Section~\ref{sec:conclusions} concludes with a summary and outlook.
 
 \section{Data Pipeline, Features, and Regression Targets}
 \label{sec:features_and_targets}
+
+Imaging atmospheric Cherenkov telescopes (IACTs) detect the Cherenkov light emitted
+by extensive air showers as they propagate through the atmosphere.
+The resulting camera image represents a projection of the longitudinal
+development of the shower and encodes information about the energy and arrival direction of
+the primary particle.
+The reconstruction methods described below provide estimates of these quantities
+with varying statistical precision and systematic biases, depending on the primary
+particle energy, shower geometry, image quality, and observing conditions.
+Their reconstructed quantities, together with intermediate reconstruction products,
+image parameters, and array geometry, are used as input features for the
+machine-learning regression model to improve the baseline event reconstruction.
+
+We assume in the following familiarity of the reader with the basic analysis concepts for IACTs,
+including calibration of each pixel signal, image cleaning, and image parameterisation
+(see e.g., \cite{1997APh.....6..343A, 2006APh....25..391H}).
+
+
+\subsection{Baseline direction reconstruction}
+
+For direction reconstruction, results from a \textit{line-intersection} method and a
+\textit{displacement method (dipsBDT)} are used as baseline.
+The line-intersection method \citep{1991ApJ...377L..97A} determines
+the shower direction in camera coordinates (features $X_{intersect}, Y_{intersect}$)
+by calculating the weighted average of the intersection points of pairs of
+image major axes.
+Weighting is crucial to suppress the influence of poorly reconstructed images,
+and typically a weighting scheme based on image size, shape, and angle between
+the image pairs is used.
+
+The displacement method (DispBDT) is a modified version of
+
+\begin{itemize}
+  \item MAGIC DISP \citep{2016APh....72...76A}
+  \item Whipple \citep{1998APh.....8..179C}
+\end{itemize}
+
+\subsection{Baseline energy reconstruction}
+
+\note{1-3 sentences on the general analysis pipelines steps;
+that there are stereo events, telescope events, etc}
 
 \subsection{Input data and pre-processing}
 
@@ -264,6 +314,8 @@ while inheriting the robustness of the DispBDT reconstruction for typical events
 \subsection{Performance metrics}
 \label{sec:metrics}
 
+\note{Incorrect - especially energy resolution}
+
 Angular performance is quantified by the angular resolution $R_{68}$,
 defined as the 68\% containment radius of the distribution of
 $\Delta\theta = \sqrt{(\hat{x} - x_\mathrm{MC})^2 + (\hat{y} - y_\mathrm{MC})^2}$
@@ -290,7 +342,8 @@ $\sum_i w_i (\hat{y}_i - y_i)^2$ jointly across all targets.
 Before training, each target is standardised to zero mean and unit variance
 (computed from the training set only) to prevent the larger numerical scale of
 the energy residual from dominating the direction residuals.
-Predictions are inverse-transformed to the original scale during inference.
+
+\note{Is the following correct?}
 
 The histogram-based tree algorithm (\texttt{tree\_method=hist}) is used throughout,
 which natively handles \texttt{NaN} feature values (missing telescopes)
@@ -447,7 +500,7 @@ comparing the XGBoost-reconstructed events with the DispBDT baseline.
 \paragraph{Energy spectrum.}
 Differential energy spectrum of the Crab Nebula estimated from the
 XGBoost-reconstructed events, compared to published measurements
-\citep{2015ICRC...34..792A} as a cross-check of the energy reconstruction.
+\citep{2015ICRC...34..792M} as a cross-check of the energy reconstruction.
 
 \section{Systematic Effects and Robustness}
 \label{sec:systematics}
@@ -460,6 +513,7 @@ The reconstruction performance (angular and energy resolution) is evaluated
 in bins of zenith angle to verify that the model generalises across the
 range of zenith angles used in VERITAS observations ($\sim 0$--$65^\circ$).
 \todo{Figure: Angular resolution $R_{68}$ and energy resolution vs.\ zenith angle (in bins), XGBoost and DispBDT baseline.}
+\todo{Figure: same for Crab}
 
 \subsection{Pointing-offset dependence}
 
@@ -470,17 +524,9 @@ accuracy. The \texttt{loss} feature (fractional image truncation) is explicitly
 included in the feature set to allow the model to correct for this effect.
 Performance is evaluated as a function of pointing offset.
 \todo{Figure: Angular and energy resolution vs.\ source offset from camera centre (in bins), XGBoost vs.\ baseline.}
+\todo{Figure: same for Crab}
 
-\subsection{Telescope multiplicity}
-
-A single model trained on all multiplicities $\geq 2$ is evaluated separately
-for two-, three-, and four-telescope events.
-The feature sorting by image size ensures that the model can handle reduced
-multiplicities without retraining, but performance is expected to degrade
-at lower multiplicities due to the reduced geometric constraints.
-\todo{Figure: Angular and energy resolution separately for 2-, 3-, and 4-telescope events; compare XGBoost and DispBDT.}
-
-\subsection{Domain shift}
+\subsection{Application to observational data}
 
 The model is trained on simulated events and applied to observational data.
 Potential domain shifts arise from imperfect simulation of telescope response,
@@ -488,7 +534,9 @@ night-sky background, or atmospheric conditions.
 The agreement between MC and data distributions for key features is checked,
 and the consistency of the reconstructed energy spectrum with published results
 provides an overall validation of the energy calibration.
-\todo{Figure: Crab Nebula differential energy spectrum (XGBoost reconstruction) overlaid with published VERITAS/MAGIC/HESS measurements \citep{2015ICRC...34..792A}. Quote flux normalisation and spectral index.}
+\todo{Figure: Crab Nebula differential energy spectrum (XGBoost reconstruction)
+overlaid with published VERITAS/MAGIC/HESS measurements \citep{2015ICRC...34..792M},
+Quote flux normalisation and spectral index.}
 
 
 
@@ -526,7 +574,24 @@ Future work will investigate training on real data using self-supervised methods
 zenith-binned models, and the integration of additional observational features
 such as night-sky background level and atmospheric monitoring data.
 
+\section*{Acknowledgments}
 
+Add acknowledgments here.
+
+
+\section*{AI usage disclosure}
+
+Generative AI tools (including Claude, ChatGPT, and Gemini) were used to assist
+with code development and debugging of the code associated to this paper.
+AI tools are also used for language improvement of this text.
+All AI-assisted outputs were reviewed, validated, and, where necessary,
+modified by the authors to ensure accuracy and reliability.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\bibliographystyle{aasjournal}
+\bibliography{../bibliography/bibliography.bib}
+
+\appendix
 
 \section{Detailed description of features}
 \label{sec:appendix_features}
@@ -607,20 +672,5 @@ Subscripts 0\ldots$N-1$ denote the sorted telescope index.} \label{tab:features-
 \texttt{Geomagnetic\_Angle} & deg & $[0,180]$ & Angle between shower direction and geomagnetic field \\
 \end{longtable}
 
-\section*{AI usage disclosure}
-
-Generative AI tools (including Claude, ChatGPT, and Gemini) were used to assist
-with code development and debugging of the code associated to this paper.
-AI tools are also used for language improvement of this text.
-All AI-assisted outputs were reviewed, validated, and, where necessary,
-modified by the authors to ensure accuracy and reliability.
-
-\section*{Acknowledgments}
-
-Add acknowledgments here.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-\bibliographystyle{aasjournal}
-\bibliography{../bibliography/bibliography.bib}
 
 \end{document}

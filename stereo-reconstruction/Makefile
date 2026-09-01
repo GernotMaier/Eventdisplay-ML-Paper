@@ -12,6 +12,7 @@ $(PDF): $(MAIN).tex ../bibliography/bibliography.bib
 	$(BIBTEX) $(MAIN)
 	$(LATEX) $(MAIN)
 	$(LATEX) $(MAIN)
+	$(LATEX) $(MAIN)
 
 .PHONY: clean
 clean:

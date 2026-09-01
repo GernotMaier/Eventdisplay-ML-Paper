@@ -1,0 +1,14 @@
+name: eventdisplay-ml-paper
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python
+  - matplotlib
+  - numpy
+  - pre-commit
+  - scipy
+  - uproot
+
+# install: conda env update -f environment.yml --prune
