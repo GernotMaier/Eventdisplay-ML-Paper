@@ -4,6 +4,9 @@
 Data are read from the background-subtracted ``htheta2Erec_diff`` histogram
 written by anasum.  MC curves are derived from the reconstructed-energy
 ``hAngularLogDiff_2D`` histogram stored in the IRF tree.
+
+The diagnostic angular distributions can be shown in either theta or theta
+squared coordinates with ``--distribution-theta2``.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ DEFAULT_MAX_THETA_DEG = 0.5
 DEFAULT_CONTAINMENT = 0.68
 DEFAULT_BOOTSTRAP_SAMPLES = 5000
 BOOTSTRAP_PERCENTILES = (15.865, 84.135)
+DEFAULT_ENERGY_RANGE = (-1.5, 2.0)
 CONTAINMENT_YMAX_PERCENTILE = 85.0
 CONTAINMENT_YMAX_PADDING = 1.20
 CONTAINMENT_YMAX_MIN_DEG = 0.30
@@ -33,7 +37,11 @@ DIAGNOSTIC_MAX_THETA_DEG = 0.25
 DIAGNOSTIC_PEAK_THETA_DEG = 0.08
 DIAGNOSTIC_YLOW_PEAK_FRACTION = 0.25
 DIAGNOSTIC_YHIGH_PEAK_FRACTION = 1.20
+DIAGNOSTIC_LOG_YLOW_PEAK_FRACTION = 1.0e-3
 DEFAULT_DISTRIBUTION_OUTPUT = Path("angular_distributions_anasum_comparison.pdf")
+DEFAULT_CUMULATIVE_DISTRIBUTION_OUTPUT = Path(
+    "angular_cumulative_distributions_anasum_comparison.pdf"
+)
 
 
 @dataclass(frozen=True)
@@ -116,7 +124,6 @@ def parse_args() -> argparse.Namespace:
     theta_limit_group.add_argument(
         "--max-theta",
         type=float,
-        default=DEFAULT_MAX_THETA_DEG,
         help="maximum angular separation for fits and selected-bin plot [deg] (default: 0.5)",
     )
     theta_limit_group.add_argument(
@@ -179,7 +186,7 @@ def parse_args() -> argparse.Namespace:
         nargs=2,
         type=float,
         metavar=("EMIN", "EMAX"),
-        help="containment x-axis range in log10(Erec/TeV)",
+        help=("containment x-axis range in log10(Erec/TeV) (default: -1.5 2.0)"),
     )
     parser.add_argument(
         "--energy-rebin",
@@ -214,17 +221,37 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cumulative-distribution-output",
+        type=Path,
+        default=DEFAULT_CUMULATIVE_DISTRIBUTION_OUTPUT,
+        help=(
+            "output PDF for the cumulative theta-squared distribution diagnostics "
+            f"(default: {DEFAULT_CUMULATIVE_DISTRIBUTION_OUTPUT})"
+        ),
+    )
+    parser.add_argument(
         "--distribution-ylim",
         nargs=2,
         type=float,
         metavar=("YMIN", "YMAX"),
         help=(
-            "angular-distribution y-axis range in deg^-1; by default it is "
-            "derived from the central peak below 0.08 deg"
+            "angular-distribution y-axis range (deg^-1, or deg^-2 with "
+            "--distribution-theta2); by default it is derived from the "
+            "central peak below 0.08 deg"
         ),
+    )
+    parser.add_argument(
+        "--distribution-theta2",
+        "--distribution-theta-squared",
+        "--theta2-distribution",
+        dest="distribution_theta2",
+        action="store_true",
+        help="plot angular-distribution diagnostics against theta squared [deg^2]",
     )
     parser.add_argument("--dpi", type=int, default=300)
     args = parser.parse_args()
+    if args.max_theta is None and args.max_theta2 is None:
+        args.max_theta = DEFAULT_MAX_THETA_DEG
     if args.max_theta is not None and (
         not np.isfinite(args.max_theta) or args.max_theta <= 0
     ):
@@ -253,6 +280,14 @@ def parse_args() -> argparse.Namespace:
         or args.distribution_ylim[0] >= args.distribution_ylim[1]
     ):
         parser.error("--distribution-ylim requires finite YMIN < YMAX")
+    if (
+        args.distribution_theta2
+        and args.distribution_ylim is not None
+        and (args.distribution_ylim[0] <= 0)
+    ):
+        parser.error(
+            "--distribution-ylim requires a positive YMIN with --distribution-theta2"
+        )
     if len(args.data_files) != len(args.mc_files):
         parser.error(
             "the number of data files and MC files must be the same "
@@ -645,22 +680,37 @@ def print_mc_theta2_cut_weights(
     mc_entry: int,
     theta2_cut: float,
 ) -> None:
-    """Print MC cut integrals and their binning bracket."""
-    print(f"\nMC weighted events inside theta2 < {theta2_cut:g} deg2")
+    """Print weighted MC sums and the limits caused by histogram binning."""
+    theta_cut = np.sqrt(theta2_cut)
+    print(
+        f"\nMC event-weight sums for theta^2 < {theta2_cut:g} deg^2 "
+        f"(theta < {theta_cut:.5f} deg)"
+    )
+    print(
+        "The cut crosses one log10(theta) bin, so the exact sum cannot be "
+        "recovered from the binned MC histogram."
+    )
+    print(
+        "For each file: lower value = exclude the cut-crossing bin; "
+        "upper value = include that entire bin."
+    )
     totals: list[tuple[float, float]] = []
     for path, label in zip(paths, labels, strict=True):
         lower, upper = mc_weight_inside_theta2_cut(
             path, tree_name, mc_entry, theta2_cut
         )
         totals.append((lower, upper))
-        print(f"{label}: {lower:.3f} to {upper:.3f} (theta binning bracket)")
+        print(f"{label}: lower = {lower:.3f}; upper = {upper:.3f}")
     if len(totals) == 2 and totals[0][0] > 0 and totals[0][1] > 0:
-        lower_ratio = totals[1][0] / totals[0][0]
-        upper_ratio = totals[1][1] / totals[0][1]
+        exclude_ratio = totals[1][0] / totals[0][0]
+        include_ratio = totals[1][1] / totals[0][1]
         print(
-            f"{labels[1]}/{labels[0]}: {min(lower_ratio, upper_ratio):.6f} "
-            f"to {max(lower_ratio, upper_ratio):.6f} (theta binning bracket)"
+            f"{labels[1]}/{labels[0]} ratio (both exclude cut bin): {exclude_ratio:.6f}"
         )
+        print(
+            f"{labels[1]}/{labels[0]} ratio (both include cut bin): {include_ratio:.6f}"
+        )
+        print("The two ratios are alternative bin-inclusion cases, not an uncertainty.")
 
 
 def default_label(path: Path) -> str:
@@ -681,21 +731,57 @@ def print_containment_tables(
     labels: list[str],
     containment: float,
 ) -> None:
-    """Print derived data and MC containment radii as aligned tables."""
-    radius_label = f"R{containment:.0%} [deg]"
+    """Print data and MC containment radii side by side for each file."""
+    radius_label = f"R{containment:.0%}"
     for label, data_result, mc_result in zip(labels, data, mc, strict=True):
-        print(f"\nContainment radii: {label} (data)")
-        print(f"{'log10(Erec/TeV)':>16}  {radius_label:>25}")
-        for index, energy in enumerate(data_result.energy_centers):
-            print(
-                f"{energy:16.4f}  "
-                f"{_format_radius(data_result.radii[index], data_result.uncertainties[:, index]):>25}"
-            )
+        print(f"\nContainment comparison: {label} ({radius_label} in deg)")
+        print(
+            f"{'log10(Erec/TeV)':>16}  "
+            f"{'data ' + radius_label:>25}  "
+            f"{'MC ' + radius_label:>12}  "
+            f"{'MC/data':>12}"
+        )
 
-        print(f"\nContainment radii: {label} (MC)")
-        print(f"{'log10(Erec/TeV)':>16}  {radius_label:>12}")
-        for index, energy in enumerate(mc_result.energy_centers):
-            print(f"{energy:16.4f}  {_format_radius(mc_result.radii[index]):>12}")
+        rows: list[tuple[float, int | None, int | None]] = []
+        matched_mc: set[int] = set()
+        for data_index, energy in enumerate(data_result.energy_centers):
+            matches = np.flatnonzero(
+                np.isclose(mc_result.energy_centers, energy, rtol=0.0, atol=1e-8)
+            )
+            mc_index = int(matches[0]) if matches.size else None
+            if mc_index is not None:
+                matched_mc.add(mc_index)
+            rows.append((float(energy), data_index, mc_index))
+        for mc_index, energy in enumerate(mc_result.energy_centers):
+            if mc_index not in matched_mc:
+                rows.append((float(energy), None, mc_index))
+        rows.sort(key=lambda row: row[0])
+
+        for energy, data_index, mc_index in rows:
+            data_radius = (
+                _format_radius(
+                    data_result.radii[data_index],
+                    data_result.uncertainties[:, data_index],
+                )
+                if data_index is not None
+                else "--"
+            )
+            mc_radius = (
+                _format_radius(mc_result.radii[mc_index])
+                if mc_index is not None
+                else "--"
+            )
+            ratio = "--"
+            if data_index is not None and mc_index is not None:
+                data_value = data_result.radii[data_index]
+                mc_value = mc_result.radii[mc_index]
+                if (
+                    np.isfinite(data_value)
+                    and data_value != 0
+                    and np.isfinite(mc_value)
+                ):
+                    ratio = f"{mc_value / data_value:.4f}"
+            print(f"{energy:16.4f}  {data_radius:>25}  {mc_radius:>12}  {ratio:>12}")
 
 
 def distribution_from_data(
@@ -705,7 +791,15 @@ def distribution_from_data(
     max_theta_deg: float | None = DEFAULT_MAX_THETA_DEG,
     max_theta2: float | None = None,
     energy_rebin: int = 1,
+    theta_squared: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, float]:
+    """Return a normalized data angular distribution at the nearest energy.
+
+    The returned density is expressed in the coordinate selected by
+    ``theta_squared``.  In particular, when it is true, both the bin edges
+    and the density are transformed to theta squared, so the density is per
+    deg^2 rather than merely being plotted against a relabelled x-axis.
+    """
     data = _rebin_data(read_data(root_file, histogram_name), energy_rebin)
     energy_centers = 0.5 * (data.energy_edges[:-1] + data.energy_edges[1:])
     energy_bin = int(np.argmin(np.abs(energy_centers - energy_center)))
@@ -725,19 +819,19 @@ def distribution_from_data(
     theta_edges_data = data.theta_edges[: theta_bins + 1]
     counts = data.counts[energy_bin, :theta_bins]
     theta_edges = np.sqrt(theta_edges_data) if data.theta_squared else theta_edges_data
-    widths = np.diff(theta_edges)
+    if theta_squared:
+        theta_edges = theta_edges**2
     total = float(np.sum(counts))
     if not np.isfinite(total) or total <= 0:
         raise ValueError(
             f"energy bin near {energy_center} in {root_file} has no positive total"
         )
-    observed = counts / total / widths
     center = energy_centers[energy_bin]
-    display_limit = (
-        np.sqrt(coordinate_limit) if data.theta_squared else coordinate_limit
-    )
-    theta_edges = theta_edges.copy()
-    theta_edges[-1] = min(theta_edges[-1], display_limit)
+    # Keep the complete selected bin. If the requested limit falls inside
+    # this bin, the plot x-limit clips it; changing the edge would imply an
+    # unsupported within-bin distribution and would also change the density.
+    widths = np.diff(theta_edges)
+    observed = counts / total / widths
     return theta_edges, observed, center
 
 
@@ -747,8 +841,13 @@ def distribution_from_mc(
     mc_entry: int,
     energy_center: float,
     max_theta_deg: float = DIAGNOSTIC_MAX_THETA_DEG,
+    theta_squared: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, float]:
-    """Read and normalize one raw MC angular histogram at the nearest energy."""
+    """Read and normalize one raw MC angular histogram at the nearest energy.
+
+    If ``theta_squared`` is true, return a density in theta squared rather
+    than theta, including the corresponding Jacobian through the bin widths.
+    """
     values, _, energy_edges, log_theta_edges = _read_mc_histogram_data(
         root_file, tree_name, mc_entry
     )
@@ -764,6 +863,8 @@ def distribution_from_mc(
             f"the angular display limit leaves no MC theta bins in {root_file}"
         )
     theta_edges = 10.0 ** log_theta_edges[: theta_bins + 1]
+    if theta_squared:
+        theta_edges = theta_edges**2
     counts = values[energy_bin, :theta_bins]
     widths = np.diff(theta_edges)
     total = float(np.sum(counts))
@@ -830,18 +931,7 @@ def make_plot(
             linewidth=1.5,
             label=f"{label} (MC, {containment:.0%})",
         )
-    all_energy = np.concatenate(
-        [result.energy_centers for result in (*data, *mc) if result.energy_centers.size]
-    )
-    energy_min, energy_max = np.min(all_energy), np.max(all_energy)
-    margin = 0.03 * (energy_max - energy_min or 1.0)
-    axis.set_xlim(
-        *(
-            energy_range
-            if energy_range is not None
-            else (energy_min - margin, energy_max + margin)
-        )
-    )
+    axis.set_xlim(*(energy_range or DEFAULT_ENERGY_RANGE))
     if ylim is None:
         ylim = _containment_ylim(data, mc)
     axis.set_ylim(*ylim)
@@ -885,12 +975,131 @@ def make_distribution_plot(
     labels: list[str],
     max_theta_deg: float = DIAGNOSTIC_MAX_THETA_DEG,
     ylim: tuple[float, float] | None = None,
+    theta_squared: bool = False,
 ) -> plt.Figure:
     """Plot data and raw MC histograms in four energy panels.
 
     The default shared y-axis is based on the central peak rather than the
     signed, statistically noisy tail.  An explicit ``ylim`` remains available
-    for publication-specific formatting.
+    for publication-specific formatting.  Theta-squared distributions use a
+    logarithmic y-axis; non-positive signed data bins are omitted because
+    they cannot be represented on that scale.
+    """
+    figure, axes = plt.subplots(
+        nrows=2,
+        ncols=2,
+        figsize=(10.5, 7.5),
+        sharex=True,
+        sharey=True,
+        constrained_layout=False,
+    )
+    axes = axes.ravel()
+    base_colors = ("#0072B2", "#D55E00")
+    colors = tuple(
+        base_colors[index]
+        if index < len(base_colors)
+        else plt.get_cmap("tab10")(index % 10)
+        for index in range(len(labels))
+    )
+    if theta_squared:
+        if ylim is not None and ylim[0] <= 0:
+            raise ValueError(
+                "theta-squared distribution plots require a strictly positive "
+                "y-axis lower limit"
+            )
+        for axis in axes:
+            axis.set_yscale("log")
+    for axis, target, panel in zip(axes, energy_centers, distributions, strict=True):
+        for (data_distribution, mc_distribution), label, color in zip(
+            panel, labels, colors, strict=True
+        ):
+            data_edges, observed, _ = data_distribution
+            mc_edges, simulation, _ = mc_distribution
+            if theta_squared:
+                observed = np.where(observed > 0, observed, np.nan)
+                simulation = np.where(simulation > 0, simulation, np.nan)
+            axis.stairs(
+                observed,
+                data_edges,
+                color=color,
+                linewidth=1.1,
+                alpha=0.8,
+                label=f"{label} (data)",
+            )
+            axis.stairs(
+                simulation,
+                mc_edges,
+                color=color,
+                linestyle="--",
+                linewidth=1.3,
+                label=f"{label} (MC)",
+            )
+        axis.set_title(
+            rf"$\log_{{10}}(E_{{\mathrm{{rec}}}}/\mathrm{{TeV}})\approx {target:.1f}$"
+        )
+        axis.grid(color="0.88", linewidth=0.6)
+    if ylim is None:
+        ylim = _distribution_peak_ylim(
+            distributions,
+            peak_theta_deg=DIAGNOSTIC_PEAK_THETA_DEG,
+            theta_squared=theta_squared,
+        )
+    for axis in axes:
+        axis.set_ylim(*ylim)
+    if theta_squared:
+        x_limit = max_theta_deg**2
+        x_label = r"Angular separation squared $\theta^2$ [deg$^2$]"
+        y_label = "Normalized density [deg$^{-2}$]"
+    else:
+        x_limit = max_theta_deg
+        x_label = r"Angular separation $\theta$ [deg]"
+        y_label = "Normalized density [deg$^{-1}$]"
+    for axis in axes:
+        axis.set_xlim(0, x_limit)
+    axes[2].set_xlabel(x_label)
+    axes[3].set_xlabel(x_label)
+    axes[0].set_ylabel(y_label)
+    handles, legend_labels = axes[0].get_legend_handles_labels()
+    figure.legend(
+        handles,
+        legend_labels,
+        loc="lower center",
+        ncol=min(3, len(legend_labels)),
+        frameon=False,
+        fontsize=8,
+    )
+    figure.tight_layout(rect=(0, 0.08, 1, 1))
+    return figure
+
+
+def _cumulative_distribution(
+    edges: np.ndarray, density: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Convert a binned density into a cumulative fraction from zero outward."""
+    masses = density * np.diff(edges)
+    cumulative = np.concatenate(([0.0], np.cumsum(masses)))
+    return edges, cumulative
+
+
+def make_cumulative_distribution_plot(
+    distributions: list[
+        list[
+            tuple[
+                tuple[np.ndarray, np.ndarray, float],
+                tuple[np.ndarray, np.ndarray, float],
+            ]
+        ]
+    ],
+    energy_centers: tuple[float, ...],
+    labels: list[str],
+    max_theta_deg: float = DIAGNOSTIC_MAX_THETA_DEG,
+) -> plt.Figure:
+    """Plot cumulative theta-squared distributions in four energy panels.
+
+    The integration starts at theta squared equal to zero, matching the
+    analysis selection that keeps events below a maximum theta-squared cut.
+    Each input distribution is already normalized over the displayed angular
+    range, so the cumulative curves reach one at that range's upper edge.
     """
     figure, axes = plt.subplots(
         nrows=2,
@@ -914,35 +1123,38 @@ def make_distribution_plot(
         ):
             data_edges, observed, _ = data_distribution
             mc_edges, simulation, _ = mc_distribution
-            axis.stairs(
-                observed,
+            data_edges, data_cumulative = _cumulative_distribution(data_edges, observed)
+            mc_edges, mc_cumulative = _cumulative_distribution(mc_edges, simulation)
+            axis.step(
                 data_edges,
+                data_cumulative,
+                where="post",
                 color=color,
                 linewidth=1.1,
                 alpha=0.8,
                 label=f"{label} (data)",
             )
-            axis.stairs(
-                simulation,
+            axis.step(
                 mc_edges,
+                mc_cumulative,
+                where="post",
                 color=color,
                 linestyle="--",
                 linewidth=1.3,
                 label=f"{label} (MC)",
             )
-        axis.set_xlim(0, max_theta_deg)
         axis.set_title(
             rf"$\log_{{10}}(E_{{\mathrm{{rec}}}}/\mathrm{{TeV}})\approx {target:.1f}$"
         )
         axis.grid(color="0.88", linewidth=0.6)
-    if ylim is None:
-        ylim = _distribution_peak_ylim(distributions)
+        axis.set_ylim(0, 1.05)
+    x_label = r"Angular separation squared $\theta^2$ [deg$^2$]"
     for axis in axes:
-        axis.set_ylim(*ylim)
-    axes[2].set_xlabel(r"Angular separation $\theta$ [deg]")
-    axes[3].set_xlabel(r"Angular separation $\theta$ [deg]")
-    axes[0].set_ylabel("Normalized density [deg$^{-1}$]")
-    axes[2].set_ylabel("Normalized density [deg$^{-1}$]")
+        axis.set_xlim(0, max_theta_deg**2)
+    axes[2].set_xlabel(x_label)
+    axes[3].set_xlabel(x_label)
+    axes[0].set_ylabel("Cumulative fraction")
+    axes[2].set_ylabel("Cumulative fraction")
     handles, legend_labels = axes[0].get_legend_handles_labels()
     figure.legend(
         handles,
@@ -966,6 +1178,7 @@ def _distribution_peak_ylim(
         ]
     ],
     peak_theta_deg: float = DIAGNOSTIC_PEAK_THETA_DEG,
+    theta_squared: bool = False,
 ) -> tuple[float, float]:
     """Choose shared limits from the central peak, ignoring noisy tails.
 
@@ -974,21 +1187,35 @@ def _distribution_peak_ylim(
     The lower limit is deliberately tied to the same peak scale because the
     signed excess can fluctuate below zero outside the source peak.
     """
+    peak_coordinate = peak_theta_deg**2 if theta_squared else peak_theta_deg
     peak_estimates: list[float] = []
     for panel in distributions:
         for data_distribution, mc_distribution in panel:
             for edges, values, _ in (data_distribution, mc_distribution):
                 centers = 0.5 * (edges[:-1] + edges[1:])
-                central = values[
-                    (centers >= 0) & (centers <= peak_theta_deg) & np.isfinite(values)
-                ]
+                central_mask = (
+                    (centers >= 0) & (centers <= peak_coordinate) & np.isfinite(values)
+                )
+                if theta_squared:
+                    central_mask &= values > 0
+                central = values[central_mask]
                 if central.size:
                     estimate = float(np.nanpercentile(central, 90))
                     if np.isfinite(estimate) and estimate > 0:
                         peak_estimates.append(estimate)
     if not peak_estimates:
+        if theta_squared:
+            return (DIAGNOSTIC_LOG_YLOW_PEAK_FRACTION, 1.0)
         return (0.0, 1.0)
     peak = max(peak_estimates)
+    if theta_squared:
+        return (
+            max(
+                DIAGNOSTIC_LOG_YLOW_PEAK_FRACTION * peak,
+                np.finfo(float).tiny,
+            ),
+            DIAGNOSTIC_YHIGH_PEAK_FRACTION * peak,
+        )
     return (
         -DIAGNOSTIC_YLOW_PEAK_FRACTION * peak,
         DIAGNOSTIC_YHIGH_PEAK_FRACTION * peak,
@@ -1053,19 +1280,50 @@ def main() -> None:
                     diagnostic_max_theta,
                     None,
                     args.energy_rebin,
+                    args.distribution_theta2,
                 ),
                 distribution_from_mc(
                     mc_path,
                     mc_tree,
                     args.mc_entry,
                     target_energy,
-                    DIAGNOSTIC_MAX_THETA_DEG,
+                    diagnostic_max_theta,
+                    args.distribution_theta2,
                 ),
             )
             for data_path, mc_path in zip(args.data_files, args.mc_files, strict=True)
         ]
         for target_energy in DIAGNOSTIC_ENERGY_CENTERS
     ]
+    cumulative_distributions = distributions
+    if not args.distribution_theta2:
+        cumulative_distributions = [
+            [
+                (
+                    distribution_from_data(
+                        data_path,
+                        args.data_histogram,
+                        target_energy,
+                        diagnostic_max_theta,
+                        None,
+                        args.energy_rebin,
+                        True,
+                    ),
+                    distribution_from_mc(
+                        mc_path,
+                        mc_tree,
+                        args.mc_entry,
+                        target_energy,
+                        diagnostic_max_theta,
+                        True,
+                    ),
+                )
+                for data_path, mc_path in zip(
+                    args.data_files, args.mc_files, strict=True
+                )
+            ]
+            for target_energy in DIAGNOSTIC_ENERGY_CENTERS
+        ]
     figure = make_plot(
         data,
         mc,
@@ -1082,8 +1340,9 @@ def main() -> None:
         distributions,
         DIAGNOSTIC_ENERGY_CENTERS,
         labels,
-        DIAGNOSTIC_MAX_THETA_DEG,
+        diagnostic_max_theta,
         tuple(args.distribution_ylim) if args.distribution_ylim else None,
+        args.distribution_theta2,
     )
     args.distribution_output.parent.mkdir(parents=True, exist_ok=True)
     distribution_figure.savefig(
@@ -1091,6 +1350,18 @@ def main() -> None:
     )
     plt.close(distribution_figure)
     print(f"Wrote {args.distribution_output}")
+    cumulative_distribution_figure = make_cumulative_distribution_plot(
+        cumulative_distributions,
+        DIAGNOSTIC_ENERGY_CENTERS,
+        labels,
+        diagnostic_max_theta,
+    )
+    args.cumulative_distribution_output.parent.mkdir(parents=True, exist_ok=True)
+    cumulative_distribution_figure.savefig(
+        args.cumulative_distribution_output, dpi=args.dpi, bbox_inches="tight"
+    )
+    plt.close(cumulative_distribution_figure)
+    print(f"Wrote {args.cumulative_distribution_output}")
 
 
 def _double_gaussian_bin_counts(
